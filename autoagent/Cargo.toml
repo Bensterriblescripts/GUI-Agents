@@ -1,0 +1,9 @@
+[package]
+name = "autoagent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+serde_json = "1"
+windows-sys = { version = "0.59", features = ["Win32_System_Power", "Win32_System_Threading"] }
