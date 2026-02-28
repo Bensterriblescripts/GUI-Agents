@@ -132,6 +132,13 @@ impl eframe::App for AutoAgentApp {
                                             .stroke(egui::Stroke::NONE)
                                             .corner_radius(egui::CornerRadius::same(255)),
                                         );
+                                        if resp.hovered() {
+                                            ui.painter().rect_filled(
+                                                resp.rect,
+                                                egui::CornerRadius::same(255),
+                                                Color32::from_rgba_unmultiplied(255, 40, 40, 25),
+                                            );
+                                        }
                                         let rect = resp.rect;
                                         let painter = ui.painter();
                                         for i in 0..3 {
@@ -154,19 +161,26 @@ impl eframe::App for AutoAgentApp {
                                     })
                                     .inner;
                             } else if self.can_clear() {
-                                clear = ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Clear").color(Color32::WHITE),
-                                        )
-                                        .min_size(egui::vec2(
-                                            CANCEL_BUTTON_WIDTH,
-                                            CANCEL_BUTTON_HEIGHT,
-                                        ))
-                                        .fill(Color32::TRANSPARENT)
-                                        .stroke(egui::Stroke::NONE)
-                                        .corner_radius(egui::CornerRadius::same(255)),
+                                let resp = ui.add(
+                                    egui::Button::new(
+                                        RichText::new("Clear").color(Color32::WHITE),
                                     )
+                                    .min_size(egui::vec2(
+                                        CANCEL_BUTTON_WIDTH,
+                                        CANCEL_BUTTON_HEIGHT,
+                                    ))
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::NONE)
+                                    .corner_radius(egui::CornerRadius::same(255)),
+                                );
+                                if resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        resp.rect,
+                                        egui::CornerRadius::same(255),
+                                        Color32::from_rgba_unmultiplied(255, 255, 255, 15),
+                                    );
+                                }
+                                clear = resp
                                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     .clicked();
                             }
