@@ -41,8 +41,9 @@ impl DisplayWakeGuard {
 impl Drop for DisplayWakeGuard {
     fn drop(&mut self) {
         if self.active {
-            unsafe {
-                SetThreadExecutionState(ES_CONTINUOUS);
+            let state = unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+            if state == 0 {
+                logging::error("SetThreadExecutionState failed to clear display wake lock");
             }
         }
     }
@@ -70,16 +71,14 @@ pub(crate) fn prompt_codex(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    let pid = child.id();
     let mut process = PromptProcessGuard {
         child: Some(child),
         stderr_handle: None,
     };
     {
         let mut active = running_prompt.lock().unwrap_or_else(|e| e.into_inner());
-        *active = Some(RunningPrompt {
-            id: prompt_id,
-            pid: process.child.as_ref().expect("child just spawned").id(),
-        });
+        *active = Some(RunningPrompt { id: prompt_id, pid });
     }
     let _running_prompt_guard = RunningPromptGuard {
         prompt_id,
@@ -89,37 +88,54 @@ pub(crate) fn prompt_codex(
     let stdout = process
         .child
         .as_mut()
-        .expect("child just spawned")
+        .ok_or_else(|| {
+            logging::error("missing child process after spawn while opening stdout");
+            io::Error::other("Missing child process")
+        })?
         .stdout
         .take()
-        .ok_or_else(|| io::Error::other("Missing stdout pipe"))?;
+        .ok_or_else(|| {
+            logging::error("missing stdout pipe after spawning codex");
+            io::Error::other("Missing stdout pipe")
+        })?;
     let stderr = process
         .child
         .as_mut()
-        .expect("child just spawned")
+        .ok_or_else(|| {
+            logging::error("missing child process after spawn while opening stderr");
+            io::Error::other("Missing child process")
+        })?
         .stderr
         .take()
-        .ok_or_else(|| io::Error::other("Missing stderr pipe"))?;
+        .ok_or_else(|| {
+            logging::error("missing stderr pipe after spawning codex");
+            io::Error::other("Missing stderr pipe")
+        })?;
     let stderr_handle = thread::spawn(move || -> io::Result<String> {
-        let mut stderr = io::BufReader::new(stderr);
-        let mut collected = String::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let read = stderr.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            let text = String::from_utf8_lossy(&buffer[..read]);
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                logging::trace(format!("codex stderr: {}", trimmed));
-                if !collected.is_empty() {
-                    collected.push('\n');
+        match logging::catch_panic("stderr reader thread", || -> io::Result<String> {
+            let mut stderr = io::BufReader::new(stderr);
+            let mut collected = String::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stderr.read(&mut buffer)?;
+                if read == 0 {
+                    break;
                 }
-                collected.push_str(trimmed);
+                let text = String::from_utf8_lossy(&buffer[..read]);
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    logging::trace(format!("codex stderr: {}", trimmed));
+                    if !collected.is_empty() {
+                        collected.push('\n');
+                    }
+                    collected.push_str(trimmed);
+                }
             }
+            Ok(collected)
+        }) {
+            Ok(result) => result,
+            Err(message) => Err(io::Error::other(message)),
         }
-        Ok(collected)
     });
     process.stderr_handle = Some(stderr_handle);
 
@@ -184,18 +200,25 @@ pub(crate) fn prompt_codex(
                 logging::trace(format!("stream update: {} visible chars", visible_len));
                 if !stream_notification_pending.swap(true, Ordering::Relaxed) {
                     let _ = tx.send(AppEvent::PromptStream(prompt_id));
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
             }
         }
     }
 
-    let status = process.child.as_mut().expect("child is active").wait()?;
+    let status = process
+        .child
+        .as_mut()
+        .ok_or_else(|| {
+            logging::error("missing child process before wait");
+            io::Error::other("Missing child process")
+        })?
+        .wait()?;
     logging::trace(format!("codex process exited with {}", status));
-    let stderr_handle = process
-        .stderr_handle
-        .take()
-        .expect("stderr reader should exist");
+    let stderr_handle = process.stderr_handle.take().ok_or_else(|| {
+        logging::error("missing stderr reader thread handle");
+        io::Error::other("Missing stderr reader thread handle")
+    })?;
     let stderr_text = join_stderr_reader(stderr_handle)?;
     let _ = process.child.take();
 
@@ -246,7 +269,11 @@ pub(crate) fn append_cancelled_text(input: &mut String) {
 }
 
 fn join_stderr_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Result<String> {
-    handle
-        .join()
-        .map_err(|_| io::Error::other("stderr reader thread panicked"))?
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => {
+            logging::error("stderr reader thread panicked during join");
+            Err(io::Error::other("stderr reader thread panicked"))
+        }
+    }
 }

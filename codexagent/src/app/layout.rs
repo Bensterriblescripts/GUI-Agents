@@ -2,13 +2,14 @@ use eframe::egui::{self, Vec2};
 
 use crate::config::{
     CARD_INNER_PADDING_X, LINE_HEIGHT, MAX_VISIBLE_ROWS, MAX_WINDOW_HEIGHT, MIN_TEXT_WRAP_WIDTH,
-    MIN_WINDOW_HEIGHT, TEXT_EDIT_MARGIN_X, WINDOW_PADDING,
+    TEXT_EDIT_MARGIN_X, WINDOW_BOTTOM_PADDING, WINDOW_PADDING,
 };
+use crate::logging;
 
-use super::AutoAgentApp;
-use super::render::text_metrics;
+use super::CodexAgentApp;
+use super::render::markdown_layout_job;
 
-impl AutoAgentApp {
+impl CodexAgentApp {
     pub(super) fn display_rows(&mut self) -> (usize, usize) {
         let wrap_width = self.text_wrap_width();
         if let Some(step) = self.pending_step() {
@@ -20,17 +21,25 @@ impl AutoAgentApp {
         if !self.text_layout_dirty && self.display_rows_width == Some(wrap_width) {
             return (self.output_rows_cache, self.input_rows_cache);
         }
-        let output_text = if self.busy {
-            &self.render_buffer
-        } else {
-            &self.output
-        };
-        let (raw_output, raw_output_h) = if output_text.is_empty() {
+        self.sync_output_galley(wrap_width);
+        self.sync_input_galley(wrap_width);
+        let (raw_output, raw_output_h) = if self.output_display_buffer.is_empty() {
             (0, 0.0)
+        } else if let Some(galley) = self.output_galley.as_ref() {
+            (galley.rows.len().max(1), galley.size().y.max(LINE_HEIGHT))
         } else {
-            text_metrics(output_text, wrap_width, &self.ctx)
+            logging::error("output galley missing during layout sync");
+            (0, 0.0)
         };
-        let (raw_input, raw_input_h) = text_metrics(&self.input, wrap_width, &self.ctx);
+        let (raw_input, raw_input_h) = if let Some(input_galley) = self.input_galley.as_ref() {
+            (
+                input_galley.rows.len().max(1),
+                input_galley.size().y.max(LINE_HEIGHT),
+            )
+        } else {
+            logging::error("input galley missing during layout sync");
+            (1, LINE_HEIGHT)
+        };
         let max_input_h = MAX_VISIBLE_ROWS as f32 * LINE_HEIGHT;
         let (output_rows, input_rows, output_h, input_h) = if raw_output > 0 {
             let o = raw_output.min(MAX_VISIBLE_ROWS - 1);
@@ -53,6 +62,31 @@ impl AutoAgentApp {
         (output_rows, input_rows)
     }
 
+    pub(super) fn sync_output_galley(&mut self, wrap_width: f32) {
+        self.sync_output_display_buffer();
+        if self.output_galley_width == Some(wrap_width) && self.output_galley.is_some() {
+            return;
+        }
+        let job = markdown_layout_job(
+            &self.output_display_buffer,
+            wrap_width,
+            &self.output_display_prompt_ranges,
+            self.output_display_response_start,
+            &self.output_display_line_kinds,
+        );
+        self.output_galley = Some(self.ctx.fonts(|fonts| fonts.layout_job(job)));
+        self.output_galley_width = Some(wrap_width);
+    }
+
+    pub(super) fn sync_input_galley(&mut self, wrap_width: f32) {
+        if self.input_galley_width == Some(wrap_width) && self.input_galley.is_some() {
+            return;
+        }
+        let job = markdown_layout_job(&self.input, wrap_width, &[], 0, &[]);
+        self.input_galley = Some(self.ctx.fonts(|fonts| fonts.layout_job(job)));
+        self.input_galley_width = Some(wrap_width);
+    }
+
     pub(super) fn text_wrap_width(&self) -> f32 {
         (self.ctx.screen_rect().width()
             - WINDOW_PADDING * 2.0
@@ -62,18 +96,31 @@ impl AutoAgentApp {
     }
 
     pub(super) fn resize_for_text(&mut self) {
+        self.resize_for_text_impl(self.auto_resize_height_limit());
+    }
+
+    pub(super) fn resize_for_appended_output(&mut self) {
+        self.resize_for_text_impl(self.auto_resize_height_limit());
+    }
+
+    fn resize_for_text_impl(&mut self, max_height: Option<f32>) {
         if self.resizing || self.user_height_override.is_some() {
             return;
         }
         let width = self.ctx.screen_rect().width();
         let (output_rows, _input_rows) = self.display_rows();
         let separator = if output_rows > 0 { 9.0 } else { 0.0 };
-        let height = (58.0
+        let mut height = (58.0
             + self.output_height_cache
             + self.input_height_cache
+            + self.command_panel_height()
             + separator
-            + WINDOW_PADDING * 2.0)
-            .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+            + WINDOW_PADDING
+            + WINDOW_BOTTOM_PADDING)
+            .clamp(self.min_inner_size().y, MAX_WINDOW_HEIGHT);
+        if let Some(max_height) = max_height {
+            height = height.min(max_height);
+        }
         let size = Vec2::new(width, height);
         if self.last_inner_size == Some(size) {
             return;
@@ -96,6 +143,9 @@ impl AutoAgentApp {
 
     pub(super) fn sync_input_focus(&mut self, response: &egui::Response) {
         if !self.pending_input_focus {
+            return;
+        }
+        if !self.ctx.input(|input| input.focused) {
             return;
         }
 

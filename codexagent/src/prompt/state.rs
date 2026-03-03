@@ -29,6 +29,9 @@ impl PromptStreamState {
         if self.prompt_id != Some(prompt_id) {
             return false;
         }
+        if self.text == text {
+            return false;
+        }
         if text.starts_with(&self.text) {
             self.text.push_str(&text[self.text.len()..]);
         } else {
@@ -74,14 +77,18 @@ impl Drop for PromptProcessGuard {
                     if let Err(e) = child.kill() {
                         logging::error(format!("failed to kill child process: {}", e));
                     }
-                    let _ = child.wait();
+                    if let Err(e) = child.wait() {
+                        logging::error(format!("failed to wait for child process: {}", e));
+                    }
                 }
                 Err(e) => {
                     logging::error(format!("failed to check child process status: {}", e));
                     if let Err(e) = child.kill() {
                         logging::error(format!("failed to kill child process: {}", e));
                     }
-                    let _ = child.wait();
+                    if let Err(e) = child.wait() {
+                        logging::error(format!("failed to wait for child process: {}", e));
+                    }
                 }
             }
         }

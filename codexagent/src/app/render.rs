@@ -1,12 +1,22 @@
 use eframe::egui::{
-    self, Color32, FontId,
+    Color32, FontId,
     text::{LayoutJob, TextFormat},
 };
+use eframe::epaint::text::Galley;
 
 use crate::config::{
     CANCELLED_BOTTOM_PADDING, CANCELLED_TEXT, HIDDEN_MARKDOWN_FONT_SIZE, LINE_HEIGHT,
     MIN_TEXT_WRAP_WIDTH, TEXT_FONT_SIZE,
 };
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum OutputLineKind {
+    #[default]
+    Normal,
+    Error,
+    Reasoning,
+    Agent,
+}
 
 pub(super) fn pending_dots(step: u128) -> &'static str {
     match step % 3 {
@@ -36,6 +46,7 @@ pub(super) fn markdown_layout_job(
     wrap_width: f32,
     prompt_ranges: &[(usize, usize)],
     response_start: usize,
+    line_kinds: &[(usize, OutputLineKind)],
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width.max(MIN_TEXT_WRAP_WIDTH);
@@ -69,6 +80,7 @@ pub(super) fn markdown_layout_job(
     let cancelled = TextFormat {
         font_id: FontId::proportional(TEXT_FONT_SIZE),
         color: Color32::from_rgb(255, 96, 96),
+        background: Color32::from_rgba_unmultiplied(255, 96, 96, 20),
         italics: true,
         ..Default::default()
     };
@@ -88,12 +100,38 @@ pub(super) fn markdown_layout_job(
         color: Color32::from_rgb(130, 140, 150),
         ..Default::default()
     };
+    let agent = TextFormat {
+        font_id: FontId::proportional(TEXT_FONT_SIZE),
+        color: Color32::WHITE,
+        ..Default::default()
+    };
+    let agent_code = TextFormat {
+        font_id: FontId::monospace(TEXT_FONT_SIZE),
+        color: Color32::from_rgba_unmultiplied(188, 194, 202, 220),
+        ..Default::default()
+    };
 
     let mut in_code = false;
     let mut byte_offset = 0usize;
+    let mut prompt_range_index = 0usize;
+    let mut line_kind_index = 0usize;
     for line in text.split_inclusive('\n') {
-        let is_prompt = prompt_ranges.iter().any(|&(s, e)| byte_offset >= s && byte_offset < e);
+        while prompt_range_index < prompt_ranges.len()
+            && byte_offset >= prompt_ranges[prompt_range_index].1
+        {
+            prompt_range_index += 1;
+        }
+        let is_prompt = prompt_ranges
+            .get(prompt_range_index)
+            .is_some_and(|&(start, end)| byte_offset >= start && byte_offset < end);
         let is_old = !is_prompt && byte_offset < response_start;
+        let line_kind =
+            if line_kind_index < line_kinds.len() && line_kinds[line_kind_index].0 == byte_offset {
+                line_kind_index += 1;
+                line_kinds[line_kind_index - 1].1
+            } else {
+                OutputLineKind::Normal
+            };
         let (rest, is_reasoning, is_agent, is_error) = if line.starts_with('\x1D') {
             job.append("\x1D", 0.0, hidden.clone());
             (&line[1..], false, false, true)
@@ -104,7 +142,12 @@ pub(super) fn markdown_layout_job(
             job.append("\x1F", 0.0, hidden.clone());
             (&line[1..], false, true, false)
         } else {
-            (line, false, false, false)
+            (
+                line,
+                line_kind == OutputLineKind::Reasoning,
+                line_kind == OutputLineKind::Agent,
+                line_kind == OutputLineKind::Error,
+            )
         };
         let content = rest.strip_suffix('\n').unwrap_or(rest).trim_start();
         if content.starts_with("```") {
@@ -130,7 +173,7 @@ pub(super) fn markdown_layout_job(
         } else if is_reasoning {
             if in_code { &reasoning_code } else { &reasoning }
         } else if is_agent {
-            if in_code { &code_new } else { &plain_new }
+            if in_code { &agent_code } else { &agent }
         } else if in_code {
             if is_old { &code_old } else { &code_new }
         } else {
@@ -159,6 +202,95 @@ pub(super) fn markdown_layout_job(
     }
 
     job
+}
+
+pub(super) fn prepare_output_display(
+    text: &str,
+    prompt_ranges: &[(usize, usize)],
+    response_start: usize,
+    clean_text: &mut String,
+    clean_prompt_ranges: &mut Vec<(usize, usize)>,
+    line_kinds: &mut Vec<(usize, OutputLineKind)>,
+    points: &mut Vec<(usize, usize)>,
+    mapped_points: &mut Vec<usize>,
+) -> usize {
+    points.clear();
+    let point_count = prompt_ranges.len() * 2 + 1;
+    if points.capacity() < point_count {
+        points.reserve(point_count - points.capacity());
+    }
+    for (index, &(start, end)) in prompt_ranges.iter().enumerate() {
+        points.push((start, index * 2));
+        points.push((end, index * 2 + 1));
+    }
+    let response_index = points.len();
+    points.push((response_start, response_index));
+    points.sort_by_key(|&(offset, _)| offset);
+
+    mapped_points.clear();
+    mapped_points.resize(points.len(), 0);
+    let mut next_point = 0usize;
+    let mut raw_offset = 0usize;
+    let mut clean_offset = 0usize;
+    clean_text.clear();
+    if clean_text.capacity() < text.len() {
+        clean_text.reserve(text.len() - clean_text.capacity());
+    }
+    clean_prompt_ranges.clear();
+    if clean_prompt_ranges.capacity() < prompt_ranges.len() {
+        clean_prompt_ranges.reserve(prompt_ranges.len() - clean_prompt_ranges.capacity());
+    }
+    line_kinds.clear();
+
+    for line in text.split_inclusive('\n') {
+        let raw_line_start = raw_offset;
+        let clean_line_start = clean_offset;
+        let (kind, marker_len) = match line.as_bytes().first().copied() {
+            Some(0x1D) => (OutputLineKind::Error, 1),
+            Some(0x1E) => (OutputLineKind::Reasoning, 1),
+            Some(0x1F) => (OutputLineKind::Agent, 1),
+            _ => (OutputLineKind::Normal, 0),
+        };
+        let raw_content_start = raw_line_start + marker_len;
+        let clean_line = &line[marker_len..];
+        let raw_line_end = raw_line_start + line.len();
+        while next_point < points.len() && points[next_point].0 <= raw_line_end {
+            let raw_point = points[next_point].0;
+            let mapped = clean_line_start + raw_point.saturating_sub(raw_content_start);
+            mapped_points[points[next_point].1] = mapped;
+            next_point += 1;
+        }
+        if kind != OutputLineKind::Normal {
+            line_kinds.push((clean_line_start, kind));
+        }
+        clean_text.push_str(clean_line);
+        raw_offset = raw_line_end;
+        clean_offset += clean_line.len();
+    }
+
+    while next_point < points.len() {
+        mapped_points[points[next_point].1] = clean_offset;
+        next_point += 1;
+    }
+
+    for index in 0..prompt_ranges.len() {
+        clean_prompt_ranges.push((mapped_points[index * 2], mapped_points[index * 2 + 1]));
+    }
+
+    mapped_points[response_index]
+}
+
+pub(super) fn response_separator_y(
+    galley: &Galley,
+    text: &str,
+    response_start: usize,
+) -> Option<f32> {
+    if response_start == 0 || response_start >= text.len() {
+        return None;
+    }
+    let char_index = text[..response_start].chars().count();
+    let rect = galley.pos_from_ccursor(eframe::egui::text::CCursor::new(char_index));
+    Some((rect.top() - LINE_HEIGHT * 0.5).max(0.0))
 }
 
 fn is_horizontal_rule(trimmed: &str) -> bool {
@@ -191,6 +323,12 @@ fn header_prefix_len(trimmed: &str) -> usize {
         return 0;
     }
     n + 1
+}
+
+fn should_show_link_target(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    target.starts_with('/')
+        || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
 }
 
 fn append_markdown_line(
@@ -272,9 +410,18 @@ fn append_markdown_line(
                     }
                 });
                 if let Some((text_end, hide_end)) = valid {
-                    job.append("[", 0.0, hidden.clone());
-                    job.append(&inner[..text_end], 0.0, format.clone());
-                    job.append(&inner[text_end..hide_end], 0.0, hidden.clone());
+                    let target = &inner[text_end + 2..hide_end - 1];
+                    if should_show_link_target(target) {
+                        job.append("[", 0.0, code_format.clone());
+                        job.append(&inner[..text_end], 0.0, format.clone());
+                        job.append("](", 0.0, code_format.clone());
+                        job.append(target, 0.0, code_format.clone());
+                        job.append(")", 0.0, code_format.clone());
+                    } else {
+                        job.append("[", 0.0, hidden.clone());
+                        job.append(&inner[..text_end], 0.0, format.clone());
+                        job.append(&inner[text_end..hide_end], 0.0, hidden.clone());
+                    }
                     remaining = &inner[hide_end..];
                 } else {
                     job.append("[", 0.0, format.clone());
@@ -286,11 +433,33 @@ fn append_markdown_line(
     }
 }
 
-pub(super) fn text_metrics(text: &str, wrap_width: f32, ctx: &egui::Context) -> (usize, f32) {
-    ctx.fonts(|fonts| {
-        let galley = fonts.layout_job(markdown_layout_job(text, wrap_width, &[], 0));
-        let rows = galley.rows.len().max(1);
-        let height = galley.size().y.max(LINE_HEIGHT);
-        (rows, height)
-    })
+#[cfg(test)]
+mod tests {
+    use super::{OutputLineKind, prepare_output_display};
+
+    #[test]
+    fn prepare_output_display_strips_markers_and_maps_offsets() {
+        let text = "prompt\n\n\x1Ereasoning\nanswer";
+        let mut clean_text = String::new();
+        let mut clean_prompt_ranges = Vec::new();
+        let mut line_kinds = Vec::new();
+        let mut points = Vec::new();
+        let mut mapped_points = Vec::new();
+
+        let response_start = prepare_output_display(
+            text,
+            &[(0, 6)],
+            8,
+            &mut clean_text,
+            &mut clean_prompt_ranges,
+            &mut line_kinds,
+            &mut points,
+            &mut mapped_points,
+        );
+
+        assert_eq!(clean_text, "prompt\n\nreasoning\nanswer");
+        assert_eq!(clean_prompt_ranges, vec![(0, 6)]);
+        assert_eq!(line_kinds, vec![(8, OutputLineKind::Reasoning)]);
+        assert_eq!(response_start, 8);
+    }
 }

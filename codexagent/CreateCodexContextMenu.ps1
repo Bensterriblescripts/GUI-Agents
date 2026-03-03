@@ -4,7 +4,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 reg.exe add "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" /ve /d "" /f
 
-$n='Launch Agent';$exe='C:\Local\Software\autoagent.exe';$ico="$env:WINDIR\System32\imageres.dll,-109"
+$n='Launch Codex';$exe='C:\Local\Software\codexagent.exe';$ico="$env:WINDIR\System32\imageres.dll,-109"
 
 foreach($p in @('Directory,%1','Directory\Background,%V')){
   $cls,$tok=$p-split','

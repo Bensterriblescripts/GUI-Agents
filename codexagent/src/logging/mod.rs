@@ -1,6 +1,8 @@
+use std::any::Any;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write, stderr};
+use std::panic::{self, PanicHookInfo};
 use std::path::PathBuf;
 use std::sync::{
     Mutex, OnceLock,
@@ -57,6 +59,7 @@ struct LogHandle {
 }
 
 static LOG_HANDLE: OnceLock<LogHandle> = OnceLock::new();
+static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 const FLUSH_BATCHES: u8 = 16;
 
 fn write_stderr(args: fmt::Arguments<'_>) {
@@ -82,12 +85,26 @@ pub fn init() {
 
         let (tx, rx) = mpsc::channel::<LogEntry>();
 
-        let handle = std::thread::spawn(move || recv_loop(rx, error_file, trace_file));
+        let handle = std::thread::spawn(move || {
+            let _ = catch_panic("log receiver thread", || {
+                recv_loop(rx, error_file, trace_file)
+            });
+        });
 
         LogHandle {
             tx: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
         }
+    });
+}
+
+pub fn install_panic_hook() {
+    PANIC_HOOK_INSTALLED.get_or_init(|| {
+        panic::set_hook(Box::new(|info| {
+            let message = format_panic_info(info);
+            write_stderr(format_args!("{}", message));
+            send(LogLevel::Error, LogMessage::Owned(message));
+        }));
     });
 }
 
@@ -110,6 +127,17 @@ pub fn error(message: impl Into<LogMessage>) {
 
 pub fn trace(message: impl Into<LogMessage>) {
     send(LogLevel::Trace, message.into());
+}
+
+pub fn catch_panic<T, F>(context: &str, f: F) -> Result<T, String>
+where
+    F: FnOnce() -> T,
+{
+    panic::catch_unwind(panic::AssertUnwindSafe(f)).map_err(|payload| {
+        let message = format!("{} panicked: {}", context, panic_payload(payload.as_ref()));
+        error(message.clone());
+        message
+    })
 }
 
 fn send(level: LogLevel, message: LogMessage) {
@@ -353,4 +381,28 @@ fn civil_from_days(days: i64) -> (i32, i32, i32) {
         year += 1;
     }
     (year, month, day)
+}
+
+fn format_panic_info(info: &PanicHookInfo<'_>) -> String {
+    let payload = panic_payload(info.payload());
+    match info.location() {
+        Some(location) => format!(
+            "panic at {}:{}:{}: {}",
+            location.file(),
+            location.line(),
+            location.column(),
+            payload
+        ),
+        None => format!("panic: {}", payload),
+    }
+}
+
+fn panic_payload(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_owned();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_owned()
 }

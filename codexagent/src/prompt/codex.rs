@@ -86,10 +86,13 @@ fn codex_launcher() -> &'static CodexLauncher {
 
 fn append_codex_args(command: &mut Command, prompt: &str, session_id: Option<&str>) {
     command.arg("exec");
-    if let Some(sid) = session_id {
+    if session_id.is_some() {
         command.arg("resume");
+    }
+    command.arg("--skip-git-repo-check");
+    command.arg("--json");
+    if let Some(sid) = session_id {
         command.arg(sid);
     }
-    command.arg("--json");
     command.arg(prompt);
 }
