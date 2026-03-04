@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Read};
 use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -78,39 +78,27 @@ pub(crate) fn prompt_codex(
     };
     {
         let mut active = running_prompt.lock().unwrap_or_else(|e| e.into_inner());
-        *active = Some(RunningPrompt { id: prompt_id, pid });
+        *active = Some(RunningPrompt {
+            id: prompt_id,
+            pid,
+            session_id: None,
+        });
     }
     let _running_prompt_guard = RunningPromptGuard {
         prompt_id,
-        running_prompt,
+        running_prompt: Arc::clone(&running_prompt),
     };
 
     let stdout = process
-        .child
-        .as_mut()
-        .ok_or_else(|| {
-            logging::error("missing child process after spawn while opening stdout");
-            io::Error::other("Missing child process")
-        })?
+        .child_mut("opening stdout")?
         .stdout
         .take()
-        .ok_or_else(|| {
-            logging::error("missing stdout pipe after spawning codex");
-            io::Error::other("Missing stdout pipe")
-        })?;
+        .ok_or_else(|| missing_stdio("stdout"))?;
     let stderr = process
-        .child
-        .as_mut()
-        .ok_or_else(|| {
-            logging::error("missing child process after spawn while opening stderr");
-            io::Error::other("Missing child process")
-        })?
+        .child_mut("opening stderr")?
         .stderr
         .take()
-        .ok_or_else(|| {
-            logging::error("missing stderr pipe after spawning codex");
-            io::Error::other("Missing stderr pipe")
-        })?;
+        .ok_or_else(|| missing_stdio("stderr"))?;
     let stderr_handle = thread::spawn(move || -> io::Result<String> {
         match logging::catch_panic("stderr reader thread", || -> io::Result<String> {
             let mut stderr = io::BufReader::new(stderr);
@@ -180,8 +168,13 @@ pub(crate) fn prompt_codex(
             }
             if kind == "thread.started" && resolved_session_id.is_none() {
                 if let Some(tid) = event.get("thread_id").and_then(Value::as_str) {
-                    logging::trace(format!("captured session id: {}", tid));
                     resolved_session_id = Some(tid.to_owned());
+                    let mut active = running_prompt.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(active_prompt) = active.as_mut() {
+                        if active_prompt.id == prompt_id {
+                            active_prompt.session_id = Some(tid.to_owned());
+                        }
+                    }
                 }
             }
         }
@@ -199,21 +192,16 @@ pub(crate) fn prompt_codex(
             if updated {
                 logging::trace(format!("stream update: {} visible chars", visible_len));
                 if !stream_notification_pending.swap(true, Ordering::Relaxed) {
-                    let _ = tx.send(AppEvent::PromptStream(prompt_id));
+                    if tx.send(AppEvent::PromptStream(prompt_id)).is_err() {
+                        logging::error("failed to deliver prompt stream update to app");
+                    }
                     ctx.request_repaint();
                 }
             }
         }
     }
 
-    let status = process
-        .child
-        .as_mut()
-        .ok_or_else(|| {
-            logging::error("missing child process before wait");
-            io::Error::other("Missing child process")
-        })?
-        .wait()?;
+    let status = process.child_mut("before wait")?.wait()?;
     logging::trace(format!("codex process exited with {}", status));
     let stderr_handle = process.stderr_handle.take().ok_or_else(|| {
         logging::error("missing stderr reader thread handle");
@@ -252,6 +240,7 @@ pub(crate) fn kill_prompt_process(pid: u32) -> io::Result<()> {
     if status.success() {
         return Ok(());
     }
+    logging::error(format!("taskkill failed for pid {}: {}", pid, status));
     Err(io::Error::other(format!("taskkill exited with {}", status)))
 }
 
@@ -275,5 +264,23 @@ fn join_stderr_reader(handle: thread::JoinHandle<io::Result<String>>) -> io::Res
             logging::error("stderr reader thread panicked during join");
             Err(io::Error::other("stderr reader thread panicked"))
         }
+    }
+}
+
+fn missing_stdio(name: &str) -> io::Error {
+    logging::error(format!("missing {} pipe after spawning codex", name));
+    io::Error::other(format!("Missing {name} pipe"))
+}
+
+trait PromptProcessExt {
+    fn child_mut(&mut self, context: &str) -> io::Result<&mut Child>;
+}
+
+impl PromptProcessExt for PromptProcessGuard {
+    fn child_mut(&mut self, context: &str) -> io::Result<&mut Child> {
+        self.child.as_mut().ok_or_else(|| {
+            logging::error(format!("missing child process {}", context));
+            io::Error::other("Missing child process")
+        })
     }
 }

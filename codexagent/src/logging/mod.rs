@@ -129,6 +129,16 @@ pub fn trace(message: impl Into<LogMessage>) {
     send(LogLevel::Trace, message.into());
 }
 
+pub fn log_result<T, E>(result: Result<T, E>, message: impl FnOnce(&E) -> String) -> Result<T, E>
+where
+    E: fmt::Display,
+{
+    if let Err(error) = &result {
+        self::error(message(error));
+    }
+    result
+}
+
 pub fn catch_panic<T, F>(context: &str, f: F) -> Result<T, String>
 where
     F: FnOnce() -> T,

@@ -9,8 +9,10 @@ use crate::config::{
 use crate::notify;
 
 use super::position::startup_outer_position;
-use super::render::{markdown_layout_job, response_separator_y};
-use super::{CodexAgentApp, MODEL_OPTIONS, SLASH_COMMANDS, WindowRestoreState};
+use super::render::markdown_layout_job;
+use super::{
+    CodexAgentApp, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS, WindowRestoreState,
+};
 
 const TITLEBAR_BUTTON_SIZE: f32 = 24.0;
 const TITLEBAR_BUTTON_SPACING: f32 = 2.0;
@@ -54,28 +56,21 @@ fn show_picker_row(
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
             ui.add(
-                egui::Label::new(
-                    RichText::new(name)
-                        .monospace()
-                        .color(if active {
-                            Color32::from_rgb(160, 214, 255)
-                        } else {
-                            Color32::from_rgb(124, 189, 255)
-                        }),
-                )
+                egui::Label::new(RichText::new(name).monospace().color(if active {
+                    Color32::from_rgb(160, 214, 255)
+                } else {
+                    Color32::from_rgb(124, 189, 255)
+                }))
                 .selectable(false)
                 .sense(egui::Sense::empty()),
             );
             ui.add_space(10.0);
             ui.add(
-                egui::Label::new(
-                    RichText::new(description)
-                        .color(if active {
-                            Color32::from_rgba_unmultiplied(214, 224, 238, 190)
-                        } else {
-                            Color32::from_rgba_unmultiplied(214, 224, 238, 150)
-                        }),
-                )
+                egui::Label::new(RichText::new(description).color(if active {
+                    Color32::from_rgba_unmultiplied(214, 224, 238, 190)
+                } else {
+                    Color32::from_rgba_unmultiplied(214, 224, 238, 150)
+                }))
                 .selectable(false)
                 .sense(egui::Sense::empty()),
             );
@@ -131,6 +126,9 @@ impl CodexAgentApp {
     }
 
     fn handle_picker_keys(&mut self, ctx: &egui::Context) -> bool {
+        if self.picker_item_count() == 0 {
+            return false;
+        }
         if self.picker_selection().is_some()
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter))
         {
@@ -146,6 +144,22 @@ impl CodexAgentApp {
         moved
     }
 
+    fn handle_prompt_history_keys(&mut self, ctx: &egui::Context) -> bool {
+        if self.prompt_history.is_empty() {
+            return false;
+        }
+        let mut handled = false;
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+            handled |= self.browse_prompt_history(false);
+        }
+        if self.prompt_history_index.is_some()
+            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowDown))
+        {
+            handled |= self.browse_prompt_history(true);
+        }
+        handled
+    }
+
     fn show_settings_menu(&mut self, ui: &mut egui::Ui) {
         let button = egui::Button::new(
             RichText::new("Settings").color(Color32::from_rgba_unmultiplied(214, 224, 238, 170)),
@@ -155,55 +169,62 @@ impl CodexAgentApp {
         .corner_radius(egui::CornerRadius::same(255));
         let response = egui::menu::menu_custom_button(ui, button, |ui| {
             self.refresh_current_model();
-            ui.set_min_width(500.0);
+            self.refresh_notifications_enabled();
+            ui.set_min_width(360.0);
             ui.scope(|ui| {
                 ui.style_mut().interaction.selectable_labels = false;
-                ui.spacing_mut().menu_spacing = 10.0;
-                ui.horizontal_top(|ui| {
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(120.0, 28.0), egui::Sense::hover());
-                    ui.painter().rect_filled(
-                        rect,
-                        8.0,
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 12),
-                    );
-                    let content_rect = rect.shrink2(egui::vec2(8.0, 5.0));
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(content_rect)
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new("Models")
-                                        .color(Color32::from_rgb(214, 224, 238)),
+                ui.menu_button(
+                    RichText::new("Model").color(Color32::from_rgb(214, 224, 238)),
+                    |ui| {
+                        ui.set_min_width(360.0);
+                        show_picker(ui, |ui| {
+                            ui.set_min_width(340.0);
+                            for option in MODEL_OPTIONS.iter() {
+                                let active = option.name == self.current_model;
+                                if show_picker_row(
+                                    ui,
+                                    option.name,
+                                    option.description,
+                                    false,
+                                    active,
                                 )
-                                .selectable(false)
-                                .sense(egui::Sense::empty()),
-                            );
-                        },
-                    );
-                    response.on_hover_cursor(CursorIcon::PointingHand);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    ui.vertical(|ui| {
-                        ui.set_min_width(340.0);
-                        for option in MODEL_OPTIONS.iter() {
-                            if show_picker_row(
-                                ui,
-                                option.name,
-                                option.description,
-                                false,
-                                option.name == self.current_model,
-                            )
-                            .clicked()
-                            {
-                                self.select_model(option.name);
-                                ui.close_menu();
+                                .clicked()
+                                {
+                                    if !active {
+                                        self.select_model(option.name);
+                                    }
+                                    ui.close_menu();
+                                }
                             }
-                        }
-                    });
-                });
+                        });
+                    },
+                );
+                ui.menu_button(
+                    RichText::new("Notification").color(Color32::from_rgb(214, 224, 238)),
+                    |ui| {
+                        ui.set_min_width(360.0);
+                        show_picker(ui, |ui| {
+                            ui.set_min_width(340.0);
+                            for option in NOTIFICATION_OPTIONS.iter() {
+                                let active = option.enabled == self.notifications_enabled;
+                                if show_picker_row(
+                                    ui,
+                                    option.name,
+                                    option.description,
+                                    false,
+                                    active,
+                                )
+                                .clicked()
+                                {
+                                    if !active {
+                                        self.select_notification(option.enabled);
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    },
+                );
             });
         })
         .response;
@@ -548,7 +569,12 @@ impl eframe::App for CodexAgentApp {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                         ui.add_space(6.0);
-                        let (output_rows, input_rows) = self.display_rows();
+                        let content_width = ui.available_width();
+                        let (output_rows, input_rows) = self.display_rows_for_width(content_width);
+                        self.resize_for_text_with_width(
+                            content_width,
+                            self.auto_resize_height_limit(),
+                        );
                         let input_h = self.input_height_cache;
                         let output_h = self.output_height_cache.max(LINE_HEIGHT);
                         if output_rows > 0 {
@@ -572,6 +598,11 @@ impl eframe::App for CodexAgentApp {
                                         Some(FontId::proportional(TEXT_FONT_SIZE));
                                     let wrap_width = ui.available_width();
                                     self.sync_output_galley(wrap_width);
+                                    let output_content_h = self
+                                        .output_galley
+                                        .as_ref()
+                                        .map(|galley| galley.size().y.max(LINE_HEIGHT))
+                                        .unwrap_or(output_h);
                                     let prompt_ranges = &self.output_display_prompt_ranges;
                                     let output_base = self.output_display_response_start;
                                     let line_kinds = &self.output_display_line_kinds;
@@ -580,7 +611,7 @@ impl eframe::App for CodexAgentApp {
                                     let output_display_buffer = &mut self.output_display_buffer;
                                     let mut layouter =
                                         |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                                            if output_galley_width == Some(wrap_width) {
+                                            if Self::same_width(output_galley_width, wrap_width) {
                                                 if let Some(galley) = output_galley.clone() {
                                                     galley
                                                 } else {
@@ -605,7 +636,7 @@ impl eframe::App for CodexAgentApp {
                                             }
                                         };
                                     let output_response = ui.add_sized(
-                                        egui::vec2(ui.available_width(), output_h),
+                                        egui::vec2(ui.available_width(), output_content_h),
                                         TextEdit::multiline(output_display_buffer)
                                             .id_source("output-display")
                                             .desired_width(f32::INFINITY)
@@ -613,12 +644,8 @@ impl eframe::App for CodexAgentApp {
                                             .layouter(&mut layouter)
                                             .frame(false),
                                     );
-                                    if let Some(galley) = output_galley.as_ref() {
-                                        if let Some(y) = response_separator_y(
-                                            galley,
-                                            output_display_buffer,
-                                            output_base,
-                                        ) {
+                                    if output_galley.is_some() {
+                                        if let Some(y) = self.output_separator_y {
                                             let sep_rect = egui::Rect::from_min_size(
                                                 egui::pos2(
                                                     output_response.rect.left(),
@@ -655,7 +682,8 @@ impl eframe::App for CodexAgentApp {
                                         let input_galley_width = self.input_galley_width;
                                         let mut layouter =
                                             |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                                                if input_galley_width == Some(wrap_width) {
+                                                if Self::same_width(input_galley_width, wrap_width)
+                                                {
                                                     if let Some(galley) = input_galley.clone() {
                                                         galley
                                                     } else {
@@ -698,8 +726,8 @@ impl eframe::App for CodexAgentApp {
                             .inner;
                         if response.changed() {
                             self.clear_picker_selection();
-                            self.invalidate_input_layout();
-                            self.resize_for_text();
+                            self.reset_prompt_history_navigation();
+                            self.refresh_after_input_change();
                         }
                         if self.slash_command_count() > 0 {
                             ui.add_space(6.0);
@@ -731,8 +759,13 @@ impl eframe::App for CodexAgentApp {
                         self.sync_input_focus(&response);
                         let picker_handled =
                             response.has_focus() && !self.locked && self.handle_picker_keys(ctx);
+                        let history_handled = response.has_focus()
+                            && !self.locked
+                            && !picker_handled
+                            && self.handle_prompt_history_keys(ctx);
                         let submit = response.has_focus()
                             && !picker_handled
+                            && !history_handled
                             && ui.input(|input| {
                                 input.key_pressed(Key::Enter) && !input.modifiers.shift
                             });

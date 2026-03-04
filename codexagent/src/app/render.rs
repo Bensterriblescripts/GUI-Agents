@@ -245,12 +245,7 @@ pub(super) fn prepare_output_display(
     for line in text.split_inclusive('\n') {
         let raw_line_start = raw_offset;
         let clean_line_start = clean_offset;
-        let (kind, marker_len) = match line.as_bytes().first().copied() {
-            Some(0x1D) => (OutputLineKind::Error, 1),
-            Some(0x1E) => (OutputLineKind::Reasoning, 1),
-            Some(0x1F) => (OutputLineKind::Agent, 1),
-            _ => (OutputLineKind::Normal, 0),
-        };
+        let (kind, marker_len) = output_line_kind(line, true);
         let raw_content_start = raw_line_start + marker_len;
         let clean_line = &line[marker_len..];
         let raw_line_end = raw_line_start + line.len();
@@ -280,17 +275,51 @@ pub(super) fn prepare_output_display(
     mapped_points[response_index]
 }
 
+pub(super) fn append_output_display(
+    text: &str,
+    mut line_start: bool,
+    clean_text: &mut String,
+    line_kinds: &mut Vec<(usize, OutputLineKind)>,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let mut clean_offset = clean_text.len();
+    for line in text.split_inclusive('\n') {
+        let clean_line_start = clean_offset;
+        let (kind, marker_len) = output_line_kind(line, line_start);
+        let clean_line = &line[marker_len..];
+        if kind != OutputLineKind::Normal {
+            line_kinds.push((clean_line_start, kind));
+        }
+        clean_text.push_str(clean_line);
+        clean_offset += clean_line.len();
+        line_start = line.ends_with('\n');
+    }
+}
+
 pub(super) fn response_separator_y(
     galley: &Galley,
-    text: &str,
-    response_start: usize,
+    response_start_char_index: usize,
 ) -> Option<f32> {
-    if response_start == 0 || response_start >= text.len() {
+    if response_start_char_index == 0 {
         return None;
     }
-    let char_index = text[..response_start].chars().count();
-    let rect = galley.pos_from_ccursor(eframe::egui::text::CCursor::new(char_index));
+    let rect = galley.pos_from_ccursor(eframe::egui::text::CCursor::new(response_start_char_index));
     Some((rect.top() - LINE_HEIGHT * 0.5).max(0.0))
+}
+
+fn output_line_kind(line: &str, line_start: bool) -> (OutputLineKind, usize) {
+    if !line_start {
+        return (OutputLineKind::Normal, 0);
+    }
+    match line.as_bytes().first().copied() {
+        Some(0x1D) => (OutputLineKind::Error, 1),
+        Some(0x1E) => (OutputLineKind::Reasoning, 1),
+        Some(0x1F) => (OutputLineKind::Agent, 1),
+        _ => (OutputLineKind::Normal, 0),
+    }
 }
 
 fn is_horizontal_rule(trimmed: &str) -> bool {
@@ -376,10 +405,12 @@ fn append_markdown_line(
                 job.append("**", 0.0, hidden.clone());
                 remaining = &remaining[2..];
                 if let Some(end) = remaining.find("**") {
-                    job.append(&remaining[..end], 0.0, hidden.clone());
+                    job.append(&remaining[..end], 0.0, format.clone());
                     job.append("**", 0.0, hidden.clone());
                     remaining = &remaining[end + 2..];
-                    job.append("...\n\n", 0.0, format.clone());
+                } else {
+                    job.append("**", 0.0, format.clone());
+                    break;
                 }
             }
             2 => {
@@ -435,7 +466,9 @@ fn append_markdown_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputLineKind, prepare_output_display};
+    use super::{
+        OutputLineKind, append_output_display, markdown_layout_job, prepare_output_display,
+    };
 
     #[test]
     fn prepare_output_display_strips_markers_and_maps_offsets() {
@@ -461,5 +494,27 @@ mod tests {
         assert_eq!(clean_prompt_ranges, vec![(0, 6)]);
         assert_eq!(line_kinds, vec![(8, OutputLineKind::Reasoning)]);
         assert_eq!(response_start, 8);
+    }
+
+    #[test]
+    fn markdown_layout_preserves_bold_text_without_inserting_ellipsis() {
+        let job = markdown_layout_job("alpha **beta** gamma", 400.0, &[], 0, &[]);
+        assert_eq!(job.text, "alpha **beta** gamma");
+    }
+
+    #[test]
+    fn append_output_display_preserves_partial_line_prefixes() {
+        let mut clean_text = String::from("prefix");
+        let mut line_kinds = Vec::new();
+
+        append_output_display(
+            "\x1Enot-a-marker\n\x1Ereasoning",
+            false,
+            &mut clean_text,
+            &mut line_kinds,
+        );
+
+        assert_eq!(clean_text, "prefix\x1Enot-a-marker\nreasoning");
+        assert_eq!(line_kinds, vec![(20, OutputLineKind::Reasoning)]);
     }
 }

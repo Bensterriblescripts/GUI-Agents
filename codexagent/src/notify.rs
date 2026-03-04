@@ -4,6 +4,7 @@ use std::ptr;
 use std::thread;
 use std::time::Duration;
 
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_TIP, NIIF_INFO, NIIF_NOSOUND, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
     Shell_NotifyIconW,
@@ -16,6 +17,7 @@ use crate::logging;
 
 type HWND = *mut c_void;
 
+const APP_ICON_RESOURCE_ID: u16 = 1;
 const NOTIFY_ICON_ID: u32 = 1;
 
 pub(crate) fn try_capture_hwnd(hwnd: &mut HWND) {
@@ -48,7 +50,7 @@ pub(crate) fn cleanup(hwnd: HWND) {
 }
 
 fn show_balloon(hwnd: HWND) {
-    let icon = unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) };
+    let icon = load_app_icon();
     if icon.is_null() {
         logging::error("LoadIconW returned a null icon handle");
     }
@@ -75,6 +77,17 @@ fn show_balloon(hwnd: HWND) {
             remove_tray_icon(hwnd_raw as HWND);
         });
     });
+}
+
+fn load_app_icon() -> *mut c_void {
+    let module = unsafe { GetModuleHandleW(ptr::null()) };
+    let resource = APP_ICON_RESOURCE_ID as usize as *const u16;
+    let icon = unsafe { LoadIconW(module, resource) };
+    if icon.is_null() {
+        unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) }
+    } else {
+        icon
+    }
 }
 
 fn remove_tray_icon(hwnd: HWND) {

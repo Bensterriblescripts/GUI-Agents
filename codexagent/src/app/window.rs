@@ -104,7 +104,7 @@ impl CodexAgentApp {
         self.user_height_override = state.user_height_override;
         self.last_inner_size = Some(state.inner_size);
         self.last_outer_size = Some(state.outer_size);
-        if inner_rect.map(|rect| rect.size()) != Some(state.inner_size) {
+        if !Self::same_size(inner_rect.map(|rect| rect.size()), state.inner_size) {
             self.ctx
                 .send_viewport_cmd(egui::ViewportCommand::InnerSize(state.inner_size));
         }
@@ -188,6 +188,13 @@ impl CodexAgentApp {
     pub(super) fn sync_windows_tiling(&mut self) {
         #[cfg(target_os = "windows")]
         {
+            let outer_rect = self.ctx.input(|input| input.viewport().outer_rect);
+            let outer_changed = !Self::same_rect(self.last_viewport_outer_rect, outer_rect);
+            self.last_viewport_outer_rect = outer_rect;
+            if !outer_changed && !self.window_dragging && !self.resizing {
+                return;
+            }
+
             if self.hwnd.is_null() || self.maximized {
                 return;
             }

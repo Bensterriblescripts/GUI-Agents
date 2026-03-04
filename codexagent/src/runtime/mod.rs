@@ -5,7 +5,8 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CreateMutexW};
 use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 use crate::config::{
@@ -14,8 +15,182 @@ use crate::config::{
 };
 use crate::logging;
 
+#[repr(C)]
+struct PropertyKey {
+    fmtid: [u8; 16],
+    pid: u32,
+}
+
+// {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, pid 5
+const PKEY_APPUSERMODEL_ID: PropertyKey = PropertyKey {
+    fmtid: [
+        0x55, 0x28, 0x4C, 0x9F, 0x79, 0x9F, 0x39, 0x4B, 0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5,
+        0xF3,
+    ],
+    pid: 5,
+};
+
+#[repr(C)]
+struct PropVariant {
+    vt: u16,
+    reserved: [u16; 3],
+    data: [usize; 2],
+}
+
+#[repr(C)]
+struct IPropertyStoreVtbl {
+    query_interface: usize,
+    add_ref: unsafe extern "system" fn(*mut IPropertyStoreRaw) -> u32,
+    release: unsafe extern "system" fn(*mut IPropertyStoreRaw) -> u32,
+    get_count: usize,
+    get_at: usize,
+    get_value: usize,
+    set_value: unsafe extern "system" fn(
+        *mut IPropertyStoreRaw,
+        *const PropertyKey,
+        *const PropVariant,
+    ) -> i32,
+    commit: unsafe extern "system" fn(*mut IPropertyStoreRaw) -> i32,
+}
+
+#[repr(C)]
+struct IPropertyStoreRaw {
+    vtbl: *const IPropertyStoreVtbl,
+}
+
+const VT_LPWSTR: u16 = 31;
+
+unsafe extern "system" {
+    fn SHGetPropertyStoreForWindow(
+        hwnd: *mut std::ffi::c_void,
+        riid: *const [u8; 16],
+        ppv: *mut *mut IPropertyStoreRaw,
+    ) -> i32;
+}
+
+// {886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}
+const IID_IPROPERTYSTORE: [u8; 16] = [
+    0xEB, 0x8E, 0x6D, 0x88, 0xF2, 0x8C, 0x46, 0x44, 0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99,
+];
+
+pub(crate) fn set_window_app_id(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let mut store: *mut IPropertyStoreRaw = std::ptr::null_mut();
+        let hr = SHGetPropertyStoreForWindow(hwnd, &IID_IPROPERTYSTORE, &mut store);
+        if hr != 0 || store.is_null() {
+            logging::error(format!("SHGetPropertyStoreForWindow failed: 0x{:08x}", hr));
+            return;
+        }
+
+        let mut wide: Vec<u16> = APP_USER_MODEL_ID
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let pv = PropVariant {
+            vt: VT_LPWSTR,
+            reserved: [0; 3],
+            data: [wide.as_mut_ptr() as usize, 0],
+        };
+
+        let vtbl = &*(*store).vtbl;
+        let hr = (vtbl.set_value)(store, &PKEY_APPUSERMODEL_ID, &pv);
+        if hr != 0 {
+            logging::error(format!("IPropertyStore::SetValue failed: 0x{:08x}", hr));
+        }
+        (vtbl.commit)(store);
+        (vtbl.release)(store);
+    }
+}
+
 const INSTALL_PATH: &str = r"C:\Local\Software\codexagent.exe";
 const LEGACY_SHORTCUT_NAMES: &[&str] = &[];
+const INSTANCE_MUTEX_NAME: &str = "Local\\CodexAgent.Instance";
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LaunchRequest {
+    pub(crate) cwd: Option<PathBuf>,
+}
+
+pub(crate) struct InstanceMutex(HANDLE);
+
+impl Drop for InstanceMutex {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+pub(crate) fn acquire_instance_mutex() -> Option<InstanceMutex> {
+    let name: Vec<u16> = INSTANCE_MUTEX_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return None;
+    }
+    let first = unsafe { GetLastError() } != ERROR_ALREADY_EXISTS;
+    if first {
+        clear_codex_state();
+    }
+    Some(InstanceMutex(handle))
+}
+
+const CODEX_STATE_FILES: &[&str] = &[
+    "models_cache.json",
+    "state_5.sqlite",
+    "state_5.sqlite-shm",
+    "state_5.sqlite-wal",
+];
+
+fn clear_codex_state() {
+    let Some(home) = env::var_os("USERPROFILE") else {
+        return;
+    };
+    let codex_dir = PathBuf::from(home).join(".codex");
+
+    let sessions_dir = codex_dir.join("sessions");
+    if sessions_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = fs::remove_dir_all(&path);
+                } else {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
+    for name in CODEX_STATE_FILES {
+        let _ = fs::remove_file(codex_dir.join(name));
+    }
+
+    logging::trace("cleared codex state");
+}
+
+pub(crate) fn apply_launch_request(request: &LaunchRequest) {
+    if let Some(path) = request.cwd.as_deref() {
+        set_process_cwd(path);
+    }
+}
+
+fn set_process_cwd(path: &Path) {
+    match env::set_current_dir(path) {
+        Ok(()) => logging::trace(format!("set working directory to {}", path.display())),
+        Err(error) => logging::error(format!(
+            "failed to set working directory to {}: {}",
+            path.display(),
+            error
+        )),
+    }
+}
 
 pub(crate) fn ensure_app_identity() {
     let wide: Vec<u16> = APP_USER_MODEL_ID
@@ -60,6 +235,9 @@ fn ensure_start_menu_shortcut() {
         }
     }
 
+    let exe_path = env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| INSTALL_PATH.to_string());
     let lnk = lnk_path.display().to_string();
     let script = format!(
         concat!(
@@ -85,7 +263,7 @@ fn ensure_start_menu_shortcut() {
             "\"@;[SA]::Set($lnk,$id)",
         ),
         lnk = lnk,
-        exe = INSTALL_PATH,
+        exe = exe_path,
         id = APP_USER_MODEL_ID,
     );
 
@@ -119,20 +297,51 @@ pub(crate) fn ensure_codex_files() -> io::Result<()> {
     let agents_path = codex_dir.join("AGENTS.md");
 
     if !config_path.exists() || !agents_path.exists() {
-        fs::create_dir_all(&codex_dir)?;
+        logging::log_result(fs::create_dir_all(&codex_dir), |error| {
+            format!(
+                "failed to create codex directory {}: {}",
+                codex_dir.display(),
+                error
+            )
+        })?;
     }
 
-    write_file_if_missing(&config_path, CODEX_CONFIG_CONTENTS)?;
-    write_file_if_missing(&agents_path, CODEX_AGENTS_CONTENTS)?;
+    logging::log_result(
+        write_file_if_missing(&config_path, CODEX_CONFIG_CONTENTS),
+        |error| {
+            format!(
+                "failed to ensure codex config {}: {}",
+                config_path.display(),
+                error
+            )
+        },
+    )?;
+    logging::log_result(
+        write_file_if_missing(&agents_path, CODEX_AGENTS_CONTENTS),
+        |error| {
+            format!(
+                "failed to ensure codex agents file {}: {}",
+                agents_path.display(),
+                error
+            )
+        },
+    )?;
 
     logging::trace(format!("codex files ready in {}", codex_dir.display()));
     Ok(())
 }
 
 pub(crate) fn current_cwd_text() -> String {
-    env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default()
+    match env::current_dir() {
+        Ok(path) => path.display().to_string(),
+        Err(error) => {
+            logging::error(format!(
+                "failed to read current working directory: {}",
+                error
+            ));
+            String::new()
+        }
+    }
 }
 
 pub(crate) fn current_model() -> String {
@@ -153,8 +362,14 @@ pub(crate) fn current_model() -> String {
 }
 
 pub(crate) fn set_model(model: &str) -> io::Result<String> {
-    ensure_codex_files()?;
+    logging::log_result(ensure_codex_files(), |error| {
+        format!(
+            "failed to prepare codex files before setting model: {}",
+            error
+        )
+    })?;
     let Some(path) = codex_config_path() else {
+        logging::error("failed to set model: USERPROFILE not set");
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "USERPROFILE not set",
@@ -163,9 +378,22 @@ pub(crate) fn set_model(model: &str) -> io::Result<String> {
     let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error),
+        Err(error) => {
+            logging::error(format!(
+                "failed to read codex config {} while setting model: {}",
+                path.display(),
+                error
+            ));
+            return Err(error);
+        }
     };
-    fs::write(&path, replace_model(&contents, model))?;
+    logging::log_result(fs::write(&path, replace_model(&contents, model)), |error| {
+        format!(
+            "failed to write codex config {} while setting model: {}",
+            path.display(),
+            error
+        )
+    })?;
     Ok(model.to_owned())
 }
 

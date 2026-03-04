@@ -4,10 +4,11 @@ use std::{io, thread};
 
 use crate::logging;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct RunningPrompt {
     pub(crate) id: u64,
     pub(crate) pid: u32,
+    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Default)]

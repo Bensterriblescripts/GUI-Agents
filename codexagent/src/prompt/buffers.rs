@@ -18,14 +18,16 @@ enum SegmentStyle {
 struct Segment {
     kind: SegmentKind,
     style: SegmentStyle,
-    text: String,
+    raw_start: usize,
+    raw_end: usize,
+    display_start: usize,
 }
 
 #[derive(Default)]
 pub(super) struct ResponseBuffers {
     segments: Vec<Segment>,
+    raw: String,
     display: String,
-    display_dirty: bool,
 }
 
 impl ResponseBuffers {
@@ -46,61 +48,26 @@ impl ResponseBuffers {
         if text.is_empty() {
             return;
         }
-        if let Some(last) = self.segments.last_mut() {
+        if let Some(last) = self.last_segment() {
             if last.kind == kind {
-                if last.text == text || last.text.ends_with(text) {
+                let last_text = self.segment_text(last);
+                if last_text == text || last_text.ends_with(text) {
                     return;
                 }
-                if text.starts_with(&last.text) {
-                    last.text.clear();
-                    last.text.push_str(text);
-                    last.style = SegmentStyle::Block;
-                    self.display_dirty = true;
+                if text.starts_with(last_text) {
+                    self.replace_last_segment_text(text, SegmentStyle::Block);
                     return;
                 }
-                if kind == SegmentKind::Agent && agent_fragment_matches(&last.text, text) {
+                if kind == SegmentKind::Agent && agent_fragment_matches(last_text, text) {
                     return;
                 }
             }
         }
-        self.segments.push(Segment {
-            kind,
-            style: SegmentStyle::Block,
-            text: text.to_owned(),
-        });
-        self.display_dirty = true;
+        self.append_segment(kind, SegmentStyle::Block, text);
     }
 
     pub(super) fn push_delta(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if let Some(last) = self.segments.last_mut() {
-            if last.kind == SegmentKind::Plain {
-                if last.text.ends_with(text) {
-                    return;
-                }
-                if text.starts_with(&last.text) {
-                    last.text.clear();
-                    last.text.push_str(text);
-                } else {
-                    last.text.push_str(text);
-                }
-                last.style = SegmentStyle::Streaming;
-                self.display_dirty = true;
-                return;
-            }
-        }
-        self.segments.push(Segment {
-            kind: SegmentKind::Plain,
-            style: if self.segments.is_empty() {
-                SegmentStyle::Streaming
-            } else {
-                SegmentStyle::Block
-            },
-            text: text.to_owned(),
-        });
-        self.display_dirty = true;
+        self.push_streaming_fragment(text, SegmentKind::Plain);
     }
 
     pub(super) fn push_reasoning(&mut self, text: &str) {
@@ -113,63 +80,63 @@ impl ResponseBuffers {
         if content.is_empty() {
             return;
         }
-        if let Some(last) = self.segments.last_mut() {
+        if let Some(last) = self.last_segment() {
             if last.kind == SegmentKind::Reasoning {
-                let existing = last.text.strip_suffix("...").unwrap_or(&last.text);
+                let last_text = self.segment_text(last);
+                let existing = last_text.strip_suffix("...").unwrap_or(last_text);
                 if existing.ends_with(content) {
                     return;
                 }
                 if content.starts_with(existing) {
-                    last.text.clear();
-                    last.text.push_str(content);
-                    last.text.push_str("...");
-                    last.style = SegmentStyle::Block;
-                    self.display_dirty = true;
+                    self.replace_last_segment_with_suffix(content, "...", SegmentStyle::Block);
                     return;
                 }
             }
         }
-        let mut text = String::with_capacity(content.len() + 3);
-        text.push_str(content);
-        text.push_str("...");
-        self.segments.push(Segment {
-            kind: SegmentKind::Reasoning,
-            style: SegmentStyle::Block,
-            text,
-        });
-        self.display_dirty = true;
+        self.append_segment_with_suffix(
+            SegmentKind::Reasoning,
+            SegmentStyle::Block,
+            content,
+            "...",
+        );
     }
 
     pub(super) fn push_reasoning_delta(&mut self, text: &str) {
+        self.push_streaming_fragment(text, SegmentKind::Reasoning);
+    }
+
+    fn push_streaming_fragment(&mut self, text: &str, kind: SegmentKind) {
         if text.is_empty() {
             return;
         }
-        if let Some(last) = self.segments.last_mut() {
-            if last.kind == SegmentKind::Reasoning {
-                if last.text.ends_with(text) {
+        if let Some(last) = self.last_segment() {
+            if last.kind == kind {
+                let last_text = self.segment_text(last);
+                let existing = if kind == SegmentKind::Reasoning {
+                    last_text.strip_suffix("...").unwrap_or(last_text)
+                } else {
+                    last_text
+                };
+                if last_text.ends_with(text) || existing.ends_with(text) {
                     return;
                 }
-                if text.starts_with(&last.text) {
-                    last.text.clear();
-                    last.text.push_str(text);
+                if text.starts_with(existing) {
+                    self.replace_last_segment_text(text, SegmentStyle::Streaming);
                 } else {
-                    last.text.push_str(text);
+                    self.append_to_last_segment_text(existing.len(), text, SegmentStyle::Streaming);
                 }
-                last.style = SegmentStyle::Streaming;
-                self.display_dirty = true;
                 return;
             }
         }
-        self.segments.push(Segment {
-            kind: SegmentKind::Reasoning,
-            style: if self.segments.is_empty() {
+        self.append_segment(
+            kind,
+            if self.segments.is_empty() {
                 SegmentStyle::Streaming
             } else {
                 SegmentStyle::Block
             },
-            text: text.to_owned(),
-        });
-        self.display_dirty = true;
+            text,
+        );
     }
 
     pub(super) fn has_deltas(&self) -> bool {
@@ -178,37 +145,123 @@ impl ResponseBuffers {
             .any(|segment| segment.style == SegmentStyle::Streaming)
     }
 
-    pub(super) fn visible_len(&mut self) -> usize {
-        self.visible_text().len()
+    pub(super) fn visible_len(&self) -> usize {
+        self.display.len()
     }
 
-    pub(super) fn visible_text(&mut self) -> &str {
-        if self.display_dirty {
-            self.rebuild_display();
-        }
+    pub(super) fn visible_text(&self) -> &str {
         &self.display
     }
 
-    fn rebuild_display(&mut self) {
-        self.display.clear();
-        for segment in &self.segments {
-            if needs_break(&self.display, segment) {
-                self.display.push_str("\n\n");
-            }
-            match segment.kind {
-                SegmentKind::Plain => self.display.push_str(&segment.text),
-                SegmentKind::Agent => append_marked(&mut self.display, '\x1F', &segment.text),
-                SegmentKind::Reasoning => append_marked(&mut self.display, '\x1E', &segment.text),
-            }
-        }
-        self.display_dirty = false;
+    pub(super) fn into_response(self) -> String {
+        self.display
     }
 
-    pub(super) fn into_response(mut self) -> String {
-        if self.display_dirty {
-            self.rebuild_display();
+    fn last_segment(&self) -> Option<&Segment> {
+        self.segments.last()
+    }
+
+    fn segment_text<'a>(&'a self, segment: &Segment) -> &'a str {
+        &self.raw[segment.raw_start..segment.raw_end]
+    }
+
+    fn append_segment(&mut self, kind: SegmentKind, style: SegmentStyle, text: &str) {
+        self.append_segment_with_suffix(kind, style, text, "");
+    }
+
+    fn append_segment_with_suffix(
+        &mut self,
+        kind: SegmentKind,
+        style: SegmentStyle,
+        text: &str,
+        suffix: &str,
+    ) {
+        let raw_start = self.raw.len();
+        self.raw.reserve(text.len() + suffix.len());
+        self.raw.push_str(text);
+        self.raw.push_str(suffix);
+        let raw_end = self.raw.len();
+        let display_start = self.display.len();
+        append_segment_display(
+            &mut self.display,
+            kind,
+            style,
+            &self.raw[raw_start..raw_end],
+        );
+        self.segments.push(Segment {
+            kind,
+            style,
+            raw_start,
+            raw_end,
+            display_start,
+        });
+    }
+
+    fn replace_last_segment_text(&mut self, text: &str, style: SegmentStyle) {
+        self.rewrite_last_segment(style, 0, text);
+    }
+
+    fn replace_last_segment_with_suffix(&mut self, text: &str, suffix: &str, style: SegmentStyle) {
+        let Some(last) = self.segments.last() else {
+            return;
+        };
+        let kind = last.kind;
+        let raw_start = last.raw_start;
+        let display_start = last.display_start;
+
+        self.raw.truncate(raw_start);
+        self.raw.reserve(text.len() + suffix.len());
+        self.raw.push_str(text);
+        self.raw.push_str(suffix);
+        let raw_end = self.raw.len();
+
+        self.display.truncate(display_start);
+        append_segment_display(
+            &mut self.display,
+            kind,
+            style,
+            &self.raw[raw_start..raw_end],
+        );
+
+        if let Some(last) = self.segments.last_mut() {
+            last.style = style;
+            last.raw_end = raw_end;
         }
-        self.display
+    }
+
+    fn append_to_last_segment_text(
+        &mut self,
+        prefix_len: usize,
+        suffix: &str,
+        style: SegmentStyle,
+    ) {
+        self.rewrite_last_segment(style, prefix_len, suffix);
+    }
+
+    fn rewrite_last_segment(&mut self, style: SegmentStyle, prefix_len: usize, suffix: &str) {
+        let Some(last) = self.segments.last() else {
+            return;
+        };
+        let kind = last.kind;
+        let raw_start = last.raw_start;
+        let display_start = last.display_start;
+
+        self.raw.truncate(raw_start + prefix_len);
+        self.raw.push_str(suffix);
+        let raw_end = self.raw.len();
+
+        self.display.truncate(display_start);
+        append_segment_display(
+            &mut self.display,
+            kind,
+            style,
+            &self.raw[raw_start..raw_end],
+        );
+
+        if let Some(last) = self.segments.last_mut() {
+            last.style = style;
+            last.raw_end = raw_end;
+        }
     }
 }
 
@@ -313,15 +366,42 @@ fn strip_bold_markers(text: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-fn needs_break(display: &str, segment: &Segment) -> bool {
+fn needs_break(display: &str, style: SegmentStyle, text: &str) -> bool {
     !display.is_empty()
-        && segment.style == SegmentStyle::Block
+        && style == SegmentStyle::Block
         && !display.ends_with('\n')
-        && !segment.text.starts_with('\n')
+        && !text.starts_with('\n')
+}
+
+fn append_segment_display(
+    display: &mut String,
+    kind: SegmentKind,
+    style: SegmentStyle,
+    text: &str,
+) {
+    display.reserve(rendered_capacity(display, style, text, kind));
+    if needs_break(display, style, text) {
+        display.push_str("\n\n");
+    }
+    match kind {
+        SegmentKind::Plain => display.push_str(text),
+        SegmentKind::Agent => append_marked(display, '\x1F', text),
+        SegmentKind::Reasoning => append_marked(display, '\x1E', text),
+    }
+}
+
+fn rendered_capacity(display: &str, style: SegmentStyle, text: &str, kind: SegmentKind) -> usize {
+    let mut capacity = text.len();
+    if needs_break(display, style, text) {
+        capacity += 2;
+    }
+    if kind != SegmentKind::Plain {
+        capacity += text.lines().count().max(1);
+    }
+    capacity
 }
 
 fn append_marked(display: &mut String, marker: char, text: &str) {
-    display.reserve(text.len() + text.lines().count().max(1));
     for line in text.split_inclusive('\n') {
         display.push(marker);
         display.push_str(line);
@@ -426,5 +506,14 @@ mod tests {
             response.into_response(),
             "\x1FPlanning repo inspection...\n\nI'm scanning the codebase.\n\n\x1FInspecting logging and error handling..."
         );
+    }
+
+    #[test]
+    fn reasoning_delta_replaces_snapshot_without_duplication() {
+        let mut response = ResponseBuffers::default();
+        response.push_reasoning("Thinking");
+        response.push_reasoning_delta(" harder");
+
+        assert_eq!(response.into_response(), "\x1EThinking harder");
     }
 }

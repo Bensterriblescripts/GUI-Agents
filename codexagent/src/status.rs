@@ -4,13 +4,18 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::logging;
 
 pub(crate) fn current_usage_text() -> String {
     match collect_usage() {
         Ok(status) => format_status(status),
-        Err(error) => format!("Failed to read usage: {}", error),
+        Err(error) => {
+            logging::error(format!("failed to read usage: {}", error));
+            format!("Failed to read usage: {}", error)
+        }
     }
 }
 
@@ -52,17 +57,55 @@ fn collect_usage() -> io::Result<UsageStatus> {
     let mut dirs = vec![sessions_dir];
 
     while let Some(dir) = dirs.pop() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
+        let entries = logging::log_result(fs::read_dir(&dir), |error| {
+            format!(
+                "failed to read sessions directory {}: {}",
+                dir.display(),
+                error
+            )
+        })?;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    logging::error(format!(
+                        "failed to read directory entry in {}: {}",
+                        dir.display(),
+                        error
+                    ));
+                    continue;
+                }
+            };
             let path = entry.path();
-            if entry.file_type()?.is_dir() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    logging::error(format!(
+                        "failed to read file type for {}: {}",
+                        path.display(),
+                        error
+                    ));
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
                 dirs.push(path);
                 continue;
             }
             if !path.extension().is_some_and(|ext| ext == "jsonl") {
                 continue;
             }
-            let Some(status) = read_session_usage(&path)? else {
+            let Some(status) = (match read_session_usage(&path) {
+                Ok(status) => status,
+                Err(error) => {
+                    logging::error(format!(
+                        "failed to read session usage from {}: {}",
+                        path.display(),
+                        error
+                    ));
+                    continue;
+                }
+            }) else {
                 continue;
             };
             if latest
@@ -108,15 +151,12 @@ fn read_session_usage(path: &Path) -> io::Result<Option<RateLimitStatus>> {
 }
 
 fn session_timestamp(value: &Value) -> Option<OffsetDateTime> {
-    let timestamp = value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| payload.get("timestamp"))
-                .and_then(Value::as_str)
-        })?;
+    let timestamp = value.get("timestamp").and_then(Value::as_str).or_else(|| {
+        value
+            .get("payload")
+            .and_then(|payload| payload.get("timestamp"))
+            .and_then(Value::as_str)
+    })?;
     OffsetDateTime::parse(timestamp, &Rfc3339).ok()
 }
 

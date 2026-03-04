@@ -9,7 +9,6 @@ mod prompt;
 mod runtime;
 mod status;
 
-use std::env;
 use std::io;
 use std::path::PathBuf;
 
@@ -20,7 +19,12 @@ use crate::config::{
     APP_DISPLAY_NAME, APP_NAME, DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
     MIN_WINDOW_WIDTH,
 };
-use crate::runtime::{ensure_app_identity, ensure_codex_files};
+use crate::runtime::{
+    LaunchRequest, acquire_instance_mutex, apply_launch_request, ensure_app_identity,
+    ensure_codex_files,
+};
+
+const APP_ICON_BYTES: &[u8] = include_bytes!("../assets/app-icon.png");
 
 fn main() -> io::Result<()> {
     logging::init();
@@ -33,7 +37,9 @@ fn main() -> io::Result<()> {
     }
     let _log_guard = LogGuard;
 
-    apply_launch_args();
+    let _instance_mutex = acquire_instance_mutex();
+    let launch_request = parse_launch_request();
+    apply_launch_request(&launch_request);
     ensure_app_identity();
 
     let result = logging::catch_panic("main thread", || -> io::Result<()> {
@@ -50,6 +56,7 @@ fn main() -> io::Result<()> {
                 .with_visible(true)
                 .with_decorations(false)
                 .with_transparent(true)
+                .with_icon(load_app_icon()?)
                 .with_title(APP_DISPLAY_NAME),
             persist_window: false,
             ..Default::default()
@@ -79,17 +86,19 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn apply_launch_args() {
-    let mut args = env::args_os().skip(1);
+fn load_app_icon() -> io::Result<egui::IconData> {
+    eframe::icon_data::from_png_bytes(APP_ICON_BYTES)
+        .map_err(|error| io::Error::other(format!("failed to load app icon: {error}")))
+}
+
+fn parse_launch_request() -> LaunchRequest {
+    let mut request = LaunchRequest::default();
+    let mut args = std::env::args_os().skip(1);
 
     while let Some(arg) = args.next() {
-        if arg == "--show" {
-            continue;
-        }
-
         if arg == "--cwd" {
             if let Some(path) = args.next() {
-                set_process_cwd(PathBuf::from(path));
+                request.cwd = Some(PathBuf::from(path));
             } else {
                 logging::error("missing path after --cwd");
             }
@@ -97,18 +106,9 @@ fn apply_launch_args() {
         }
 
         if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--cwd=")) {
-            set_process_cwd(PathBuf::from(value));
+            request.cwd = Some(PathBuf::from(value));
         }
     }
-}
 
-fn set_process_cwd(path: PathBuf) {
-    match env::set_current_dir(&path) {
-        Ok(()) => logging::trace(format!("set working directory to {}", path.display())),
-        Err(error) => logging::error(format!(
-            "failed to set working directory to {}: {}",
-            path.display(),
-            error
-        )),
-    }
+    request
 }

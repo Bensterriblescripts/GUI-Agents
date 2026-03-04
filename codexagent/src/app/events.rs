@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use eframe::egui;
 
+use crate::config::set_notifications_enabled;
 use crate::events::{AppEvent, PromptResult};
 use crate::logging;
 use crate::notify;
@@ -11,8 +12,8 @@ use crate::prompt::{append_cancelled_text, kill_prompt_process, prompt_codex};
 use crate::runtime::{ensure_codex_files, set_model};
 use crate::status::current_usage_text;
 
-use super::render::trim_string_in_place;
 use super::CodexAgentApp;
+use super::render::trim_string_in_place;
 
 impl CodexAgentApp {
     pub(super) fn submit(&mut self) {
@@ -21,6 +22,7 @@ impl CodexAgentApp {
         }
         self.clear_picker_selection();
         let prompt = std::mem::take(&mut self.input);
+        self.push_prompt_history(&prompt);
 
         if self.handle_slash_command(&prompt) {
             return;
@@ -48,9 +50,8 @@ impl CodexAgentApp {
         self.active_prompt_id = Some(prompt_id);
         self.pending_started_at = Some(Instant::now());
         self.push_prompt_output(&prompt);
-        self.invalidate_input_layout();
-        self.invalidate_output_layout();
-        self.resize_for_appended_output();
+        self.persist_history();
+        self.refresh_after_text_change();
         self.stream_notification_pending
             .store(false, Ordering::Relaxed);
         {
@@ -58,6 +59,7 @@ impl CodexAgentApp {
             stream.start(prompt_id);
         }
 
+        let request_prompt = self.build_request_prompt(prompt);
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let running_prompt = Arc::clone(&self.running_prompt);
@@ -68,7 +70,7 @@ impl CodexAgentApp {
             let result = match logging::catch_panic("prompt worker thread", || {
                 match prompt_codex(
                     prompt_id,
-                    prompt,
+                    request_prompt,
                     session_id,
                     running_prompt,
                     shared_stream,
@@ -98,13 +100,12 @@ impl CodexAgentApp {
             "/status" => {
                 self.push_prompt_output(prompt);
                 self.output.push_str(&current_usage_text());
+                self.persist_history();
             }
             _ => return false,
         }
         self.pending_input_focus = true;
-        self.invalidate_input_layout();
-        self.invalidate_output_layout();
-        self.resize_for_appended_output();
+        self.refresh_after_text_change();
         true
     }
 
@@ -112,21 +113,54 @@ impl CodexAgentApp {
         self.clear_picker_selection();
         if name == "status" {
             self.input.clear();
+            self.reset_prompt_history_navigation();
             self.handle_slash_command("/status");
             return;
         }
         self.input.clear();
         self.input.push('/');
         self.input.push_str(name);
+        self.reset_prompt_history_navigation();
         self.pending_input_focus = true;
-        self.invalidate_input_layout();
-        self.resize_for_text();
+        self.refresh_after_input_change();
     }
 
     pub(super) fn select_model(&mut self, model: &str) {
         self.clear_picker_selection();
+        if self.current_model == model {
+            return;
+        }
         let prompt = format!("settings model {}", model);
         self.apply_model_selection(&prompt, model);
+    }
+
+    pub(super) fn select_notification(&mut self, enabled: bool) {
+        self.clear_picker_selection();
+        if self.notifications_enabled == enabled {
+            return;
+        }
+        match set_notifications_enabled(enabled) {
+            Ok(enabled) => {
+                self.notifications_enabled = enabled;
+                self.output.push_str("Notification set to ");
+                self.output.push_str(if enabled { "On" } else { "Off" });
+                self.input.clear();
+                self.reset_prompt_history_navigation();
+            }
+            Err(error) => {
+                logging::error(format!(
+                    "failed to set notification {}: {}",
+                    if enabled { "on" } else { "off" },
+                    error
+                ));
+                self.output.push('\x1D');
+                self.output.push_str("Failed to set notification: ");
+                self.output.push_str(&error.to_string());
+            }
+        }
+        self.persist_history();
+        self.pending_input_focus = true;
+        self.refresh_after_text_change();
     }
 
     fn apply_model_selection(&mut self, prompt: &str, model: &str) {
@@ -138,17 +172,18 @@ impl CodexAgentApp {
                 self.output.push_str("Model set to ");
                 self.output.push_str(&model);
                 self.input.clear();
+                self.reset_prompt_history_navigation();
             }
             Err(error) => {
+                logging::error(format!("failed to set model {}: {}", model, error));
                 self.output.push('\x1D');
                 self.output.push_str("Failed to set model: ");
                 self.output.push_str(&error.to_string());
             }
         }
+        self.persist_history();
         self.pending_input_focus = true;
-        self.invalidate_input_layout();
-        self.invalidate_output_layout();
-        self.resize_for_appended_output();
+        self.refresh_after_text_change();
     }
 
     fn push_prompt_output(&mut self, prompt: &str) {
@@ -165,6 +200,7 @@ impl CodexAgentApp {
         self.prompt_ranges.push((prompt_start, self.output.len()));
         self.output.push_str("\n\n");
         self.output_base = self.output.len();
+        self.output_display_can_append = false;
     }
 
     pub(super) fn cancel_active_prompt(&mut self) {
@@ -180,6 +216,12 @@ impl CodexAgentApp {
         };
 
         logging::trace(format!("canceling prompt pid {}", running_prompt.pid));
+        if let Some(session_id) = running_prompt.session_id {
+            self.session_id = Some(session_id);
+            self.cancelled_resume_context = None;
+        } else {
+            self.capture_cancelled_resume_context();
+        }
         self.active_prompt_id = None;
         self.busy = false;
         self.locked = false;
@@ -188,8 +230,8 @@ impl CodexAgentApp {
             .store(false, Ordering::Relaxed);
         self.clear_render_buffer();
         append_cancelled_text(&mut self.output);
-        self.invalidate_output_layout();
-        self.resize_for_appended_output();
+        self.persist_history();
+        self.refresh_after_output_change();
         {
             let mut stream = self.shared_stream.lock().unwrap_or_else(|e| e.into_inner());
             stream.clear(running_prompt.id);
@@ -221,21 +263,22 @@ impl CodexAgentApp {
                             if self.output.get(self.output_base..) != Some(next) {
                                 let append_from = {
                                     let current = &self.output[self.output_base..];
-                                    next.strip_prefix(current).map(|suffix| next.len() - suffix.len())
+                                    next.strip_prefix(current)
+                                        .map(|suffix| next.len() - suffix.len())
                                 };
                                 if let Some(start) = append_from {
                                     self.output.push_str(&next[start..]);
                                 } else {
                                     self.output.truncate(self.output_base);
                                     self.output.push_str(next);
+                                    self.output_display_can_append = false;
                                 }
                                 updated = true;
                             }
                         }
                     }
                     if updated {
-                        self.invalidate_output_layout();
-                        self.resize_for_appended_output();
+                        self.refresh_after_output_change();
                     }
                 }
             }
@@ -256,12 +299,14 @@ impl CodexAgentApp {
                 self.locked = false;
                 self.pending_input_focus = true;
                 self.output.truncate(self.output_base);
+                self.output_display_can_append = false;
                 match result {
                     PromptResult::Ok(text, sid) => {
                         self.output.reserve(text.len());
                         self.output.push_str(&text);
                         if sid.is_some() {
                             self.session_id = sid;
+                            self.cancelled_resume_context = None;
                         }
                     }
                     PromptResult::Err(error) => {
@@ -282,9 +327,11 @@ impl CodexAgentApp {
                     let mut stream = self.shared_stream.lock().unwrap_or_else(|e| e.into_inner());
                     stream.clear(prompt_id);
                 }
-                self.invalidate_output_layout();
-                self.resize_for_appended_output();
-                notify::prompt_completed(self.hwnd);
+                self.persist_history();
+                self.refresh_after_output_change();
+                if self.notifications_enabled {
+                    notify::prompt_completed(self.hwnd);
+                }
             }
         }
     }
