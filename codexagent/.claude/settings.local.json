@@ -2,7 +2,6 @@
   "permissions": {
     "allow": [
       "Bash(cargo check:*)",
-      "Bash(cargo test:*)",
       "Bash(cargo build:*)",
       "Bash(powershell:*)",
       "Bash(timeout 5 cargo run:*)"

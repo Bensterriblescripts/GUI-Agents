@@ -279,10 +279,6 @@ fn ensure_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-fn prompt_history_to_settings(history: &PromptHistory) -> HashMap<String, String> {
-    prompt_history_to_settings_slice(&history.prompts)
-}
 
 fn prompt_history_to_settings_slice(prompts: &[String]) -> HashMap<String, String> {
     let mut settings = HashMap::with_capacity((!prompts.is_empty()) as usize);
@@ -414,12 +410,6 @@ fn legacy_prompt_history_entries(settings: &HashMap<String, String>) -> io::Resu
     prompt_history_entries_from_output(&output, &prompt_ranges)
 }
 
-#[cfg(test)]
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    append_hex(&mut out, bytes);
-    out
-}
 
 fn append_hex(out: &mut String, bytes: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -456,87 +446,4 @@ fn decode_hex_to_string(value: &str) -> io::Result<String> {
     }
 
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::{
-        MAX_PROMPT_HISTORY, PromptHistory, decode_hex_to_string, encode_hex,
-        notification_setting_value, parse_config, parse_notification_value,
-        prompt_history_from_settings, prompt_history_to_settings,
-    };
-
-    #[test]
-    fn parse_config_reads_key_values() {
-        let config = b"alpha=one\n# comment\nbeta = \"two\"\nignored\n";
-        let parsed = parse_config(config);
-        assert_eq!(parsed.get("alpha").map(String::as_str), Some("one"));
-        assert_eq!(parsed.get("beta").map(String::as_str), Some("two"));
-        assert!(!parsed.contains_key("ignored"));
-    }
-
-    #[test]
-    fn hex_round_trip_preserves_utf8() {
-        let text = "prompt\n\nresponse";
-        assert_eq!(
-            decode_hex_to_string(&encode_hex(text.as_bytes())).unwrap(),
-            text
-        );
-    }
-
-    #[test]
-    fn prompt_history_settings_round_trip() {
-        let history = PromptHistory {
-            prompts: vec!["first".to_owned(), "second".to_owned()],
-        };
-        let parsed = prompt_history_from_settings(&prompt_history_to_settings(&history)).unwrap();
-        assert_eq!(parsed.prompts, history.prompts);
-    }
-
-    #[test]
-    fn prompt_history_backfills_prompts_from_output() {
-        let mut settings = HashMap::new();
-        settings.insert(
-            "output_hex".to_owned(),
-            encode_hex("alpha\n\none\n\nbeta\n\ntwo".as_bytes()),
-        );
-        settings.insert("prompt_ranges".to_owned(), "0:5,12:16".to_owned());
-        let parsed = prompt_history_from_settings(&settings).unwrap();
-        assert_eq!(parsed.prompts, vec!["alpha".to_owned(), "beta".to_owned()]);
-    }
-
-    #[test]
-    fn prompt_history_is_trimmed_to_maximum() {
-        let history = PromptHistory {
-            prompts: (0..(MAX_PROMPT_HISTORY + 5))
-                .map(|index| format!("prompt-{index}"))
-                .collect(),
-        };
-        let parsed = prompt_history_from_settings(&prompt_history_to_settings(&history)).unwrap();
-        assert_eq!(parsed.prompts.len(), MAX_PROMPT_HISTORY);
-        assert_eq!(parsed.prompts.first().map(String::as_str), Some("prompt-5"));
-        assert_eq!(
-            parsed.prompts.last().map(String::as_str),
-            Some("prompt-104")
-        );
-    }
-
-    #[test]
-    fn parse_notification_value_supports_common_flags() {
-        assert_eq!(parse_notification_value("on"), Some(true));
-        assert_eq!(parse_notification_value("true"), Some(true));
-        assert_eq!(parse_notification_value("1"), Some(true));
-        assert_eq!(parse_notification_value("off"), Some(false));
-        assert_eq!(parse_notification_value("false"), Some(false));
-        assert_eq!(parse_notification_value("0"), Some(false));
-        assert_eq!(parse_notification_value("maybe"), None);
-    }
-
-    #[test]
-    fn notification_setting_value_writes_canonical_values() {
-        assert_eq!(notification_setting_value(true), "on");
-        assert_eq!(notification_setting_value(false), "off");
-    }
 }

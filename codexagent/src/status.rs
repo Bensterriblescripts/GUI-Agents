@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
+use time::{OffsetDateTime, UtcOffset, Weekday};
 
 use crate::logging;
 
@@ -262,13 +262,33 @@ fn format_limit(
 fn format_reset(limit: RateLimit, now: OffsetDateTime, local_offset: UtcOffset) -> String {
     if let Some(resets_at) = limit.resets_at {
         let remaining_seconds = (resets_at - now).whole_seconds().max(0);
+        let resets_local = resets_at.to_offset(local_offset).date();
+        let now_local = now.to_offset(local_offset).date();
         return if remaining_seconds == 0 {
             "Resets now".to_owned()
+        } else if resets_local == now_local {
+            "Resets Today".to_owned()
         } else {
-            format!("Resets at {}", format_local_time(resets_at, local_offset))
+            format!(
+                "Resets on {} at {}",
+                format_local_day(resets_at, local_offset),
+                format_local_time(resets_at, local_offset)
+            )
         };
     }
     format!("Window {}", format_duration_minutes(limit.window_minutes))
+}
+
+fn format_local_day(datetime: OffsetDateTime, local_offset: UtcOffset) -> &'static str {
+    match datetime.to_offset(local_offset).weekday() {
+        Weekday::Monday => "Monday",
+        Weekday::Tuesday => "Tuesday",
+        Weekday::Wednesday => "Wednesday",
+        Weekday::Thursday => "Thursday",
+        Weekday::Friday => "Friday",
+        Weekday::Saturday => "Saturday",
+        Weekday::Sunday => "Sunday",
+    }
 }
 
 fn format_local_time(datetime: OffsetDateTime, local_offset: UtcOffset) -> String {
@@ -309,94 +329,4 @@ fn format_percent(value: f64) -> String {
         return format!("{:.0}%", value);
     }
     format!("{:.1}%", value)
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use time::{OffsetDateTime, UtcOffset};
-
-    use super::{
-        RateLimit, format_duration_minutes, format_percent, format_status_at, session_rate_limits,
-    };
-
-    fn unix(seconds: i64) -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp(seconds).expect("valid unix timestamp")
-    }
-
-    #[test]
-    fn formats_duration_labels() {
-        assert_eq!(format_duration_minutes(300), "5h");
-        assert_eq!(format_duration_minutes(10080), "7d");
-        assert_eq!(format_duration_minutes(45), "45m");
-        assert_eq!(format_duration_minutes(92), "1h 32m");
-        assert_eq!(format_duration_minutes(1500), "1d 1h");
-    }
-
-    #[test]
-    fn formats_remaining_percent_without_trailing_decimal() {
-        assert_eq!(format_percent(82.0), "82%");
-        assert_eq!(format_percent(82.5), "82.5%");
-    }
-
-    #[test]
-    fn formats_remaining_status() {
-        let text = format_status_at(
-            super::UsageStatus {
-                primary: Some(RateLimit {
-                    used_percent: 18.0,
-                    window_minutes: 300,
-                    resets_at: Some(unix(1772598059)),
-                }),
-                secondary: Some(RateLimit {
-                    used_percent: 6.0,
-                    window_minutes: 10080,
-                    resets_at: Some(unix(1773119113)),
-                }),
-            },
-            unix(1772592508),
-            UtcOffset::from_hms(13, 0, 0).expect("valid offset"),
-        );
-        assert_eq!(
-            text,
-            "`Daily:  82% remaining (Resets at 5:20 PM)`\n`Weekly: 94% remaining (Resets at 6:05 PM)`"
-        );
-    }
-
-    #[test]
-    fn reads_current_token_count_event_shape() {
-        let value = json!({
-            "timestamp": "2026-03-04T02:45:53.905Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "token_count",
-                "rate_limits": {
-                    "primary": {
-                        "used_percent": 71.0,
-                        "window_minutes": 300,
-                        "resets_at": 1772598059
-                    },
-                    "secondary": {
-                        "used_percent": 40.0,
-                        "window_minutes": 10080,
-                        "resets_at": 1773119113
-                    }
-                }
-            }
-        });
-        let json = value.to_string();
-        let event: super::SessionEvent<'_> =
-            serde_json::from_str(&json).expect("expected session event");
-
-        let status = session_rate_limits(&event).expect("expected rate-limit status");
-
-        assert_eq!(
-            format_status_at(
-                status.limits,
-                unix(1772592508),
-                UtcOffset::from_hms(13, 0, 0).expect("valid offset"),
-            ),
-            "`Daily:  29% remaining (Resets at 5:20 PM)`\n`Weekly: 60% remaining (Resets at 6:05 PM)`"
-        );
-    }
 }

@@ -11,7 +11,7 @@ use super::CodexAgentApp;
 use super::render::{markdown_layout_job, response_separator_y};
 
 impl CodexAgentApp {
-    fn visible_row_limit(&self) -> usize {
+    pub(super) fn visible_row_limit(&self) -> usize {
         if self.user_height_override.is_some() {
             MAX_VISIBLE_ROWS
         } else {

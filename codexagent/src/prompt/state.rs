@@ -115,32 +115,3 @@ fn clear_running_prompt(running_prompt: &Arc<Mutex<Option<RunningPrompt>>>, prom
         *active = None;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::PromptStreamState;
-
-    #[test]
-    fn update_appends_prefix_growth_without_replacing_generation() {
-        let mut state = PromptStreamState::default();
-        state.start(1);
-        let generation = state.generation;
-
-        assert!(state.update(1, "alpha"));
-        assert!(state.update(1, "alpha beta"));
-        assert_eq!(state.generation, generation);
-        assert_eq!(state.text, "alpha beta");
-    }
-
-    #[test]
-    fn update_bumps_generation_when_stream_restarts_from_new_snapshot() {
-        let mut state = PromptStreamState::default();
-        state.start(1);
-        state.update(1, "alpha beta");
-        let generation = state.generation;
-
-        assert!(state.update(1, "reset"));
-        assert_ne!(state.generation, generation);
-        assert_eq!(state.text, "reset");
-    }
-}

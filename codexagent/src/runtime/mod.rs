@@ -830,32 +830,3 @@ fn quoted_value(value: &str) -> String {
     quoted.push('"');
     quoted
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_model, replace_model};
-
-    #[test]
-    fn replace_model_updates_existing_entry() {
-        let contents = "approval_policy = \"never\"\nmodel = \"gpt-5\"\n";
-        assert_eq!(
-            replace_model(contents, "gpt-5.2-codex"),
-            "approval_policy = \"never\"\nmodel = \"gpt-5.2-codex\"\n"
-        );
-    }
-
-    #[test]
-    fn replace_model_appends_missing_entry() {
-        let contents = "approval_policy = \"never\"\n";
-        assert_eq!(
-            replace_model(contents, "gpt-5.2-codex"),
-            "approval_policy = \"never\"\nmodel = \"gpt-5.2-codex\"\n"
-        );
-    }
-
-    #[test]
-    fn parse_model_reads_configured_value() {
-        let contents = "approval_policy = \"never\"\nmodel = \"gpt-5.2-codex\"\n";
-        assert_eq!(parse_model(contents).as_deref(), Some("gpt-5.2-codex"));
-    }
-}

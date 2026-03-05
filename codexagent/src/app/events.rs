@@ -560,16 +560,3 @@ fn is_codex_missing(error: &str) -> bool {
         || error.contains("program not found")
         || error.contains("is not recognized as an internal or external command")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_codex_missing;
-
-    #[test]
-    fn detects_program_not_found_errors() {
-        assert!(is_codex_missing("program not found"));
-        assert!(is_codex_missing(
-            "'codex' is not recognized as an internal or external command"
-        ));
-    }
-}

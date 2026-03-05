@@ -65,10 +65,12 @@ fn show_picker_row(
     selected: bool,
     active: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
+    let row_id = ui.next_auto_id();
+    let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), SETTINGS_ROW_HEIGHT),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
+    let response = ui.interact(rect, row_id, egui::Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
         Color32::from_rgba_unmultiplied(124, 189, 255, 28)
@@ -270,6 +272,7 @@ fn show_settings_submenu<R>(
 
     let mut popup = None;
     let mut popup_rect = None;
+    let mut popup_hovered = false;
     let mut button_rect = response.rect;
 
     if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
@@ -286,7 +289,7 @@ fn show_settings_submenu<R>(
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .default_width(SETTINGS_SUBMENU_WIDTH)
-            .sense(egui::Sense::click());
+            .sense(egui::Sense::hover());
         let area_response = area.show(ui.ctx(), |ui| {
             ui.set_width(SETTINGS_SUBMENU_WIDTH);
             frame
@@ -296,12 +299,14 @@ fn show_settings_submenu<R>(
                 })
                 .inner
         });
+        popup_hovered = area_response.response.hovered();
         popup_rect = Some(area_response.response.rect);
         popup = Some(area_response.inner);
     }
 
     if is_open {
         let mut keep_open = response.hovered();
+        keep_open |= popup_hovered;
         if let Some(rect) = popup_rect {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
                 keep_open |= rect.contains(pointer);
@@ -1009,7 +1014,7 @@ impl eframe::App for CodexAgentApp {
                             });
                             ui.add_space(4.0);
                         }
-                        let response = ui
+                        let input_edit = ui
                             .scope(|ui| {
                                 ui.visuals_mut().override_text_color = Some(Color32::WHITE);
                                 egui::ScrollArea::vertical()
@@ -1042,15 +1047,28 @@ impl eframe::App for CodexAgentApp {
                                             .layouter(&mut layouter)
                                             .frame(false)
                                             .show(ui)
-                                            .response
                                     })
                                     .inner
                             })
                             .inner;
-                        if response.changed() {
+                        let response = input_edit.response;
+                        let raw_input_rows = input_edit.galley.rows.len().max(1);
+                        let visible_row_limit = self.visible_row_limit();
+                        let max_input_rows = if output_rows > 0 {
+                            visible_row_limit.saturating_sub(output_rows).max(1)
+                        } else {
+                            visible_row_limit
+                        };
+                        let expected_input_rows = raw_input_rows.min(max_input_rows);
+                        let input_needs_growth = expected_input_rows > input_rows;
+                        if response.changed() || input_needs_growth {
                             self.clear_picker_selection();
                             self.reset_prompt_history_navigation();
-                            self.refresh_after_input_change();
+                            self.invalidate_input_layout();
+                            self.resize_for_text_with_width(
+                                content_width,
+                                self.auto_resize_height_limit(),
+                            );
                         }
                         if self.slash_command_count() > 0 {
                             ui.add_space(6.0);

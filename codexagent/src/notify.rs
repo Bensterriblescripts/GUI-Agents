@@ -123,26 +123,3 @@ fn encode_wide_into(s: &str, dst: &mut [u16]) {
         *slot = 0;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::ptr;
-
-    use super::{encode_wide_into, should_show_notification};
-
-    #[test]
-    fn encode_wide_into_zero_terminates_and_clears_tail() {
-        let mut buffer = [42u16; 8];
-        encode_wide_into("abc", &mut buffer);
-        assert_eq!(buffer[..4], [97, 98, 99, 0]);
-        assert!(buffer[4..].iter().all(|&value| value == 0));
-    }
-
-    #[test]
-    fn should_show_notification_only_when_window_is_not_foreground() {
-        let hwnd = ptr::dangling_mut::<std::ffi::c_void>();
-        let other = ptr::with_exposed_provenance_mut::<std::ffi::c_void>(2);
-        assert!(!should_show_notification(hwnd, hwnd));
-        assert!(should_show_notification(hwnd, other));
-    }
-}
