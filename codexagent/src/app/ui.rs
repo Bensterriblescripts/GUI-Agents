@@ -24,7 +24,6 @@ const SETTINGS_MENU_WIDTH: f32 = 360.0 * 0.4 * 1.2;
 const SETTINGS_SUBMENU_WIDTH: f32 = SETTINGS_MENU_WIDTH * 1.2 * 1.3 * 1.3;
 const SETTINGS_SUBMENU_PICKER_WIDTH: f32 = SETTINGS_SUBMENU_WIDTH;
 const SETTINGS_SUBMENU_SPACING: f32 = 8.0;
-const SETTINGS_SUBMENU_OFFSET_X: f32 = 0.0;
 const SETTINGS_ROW_HEIGHT: f32 = 28.0;
 const SETTINGS_ROW_RADIUS: u8 = 8;
 const SETTINGS_ROW_PADDING_X: f32 = 8.0;
@@ -65,16 +64,13 @@ fn show_picker_row(
     selected: bool,
     active: bool,
 ) -> egui::Response {
-    let row_id = ui.next_auto_id();
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), SETTINGS_ROW_HEIGHT),
-        egui::Sense::hover(),
+        egui::Sense::click(),
     );
-    let response = ui.interact(rect, row_id, egui::Sense::click());
-    let hovered = response.hovered();
     let fill = if selected {
         Color32::from_rgba_unmultiplied(124, 189, 255, 28)
-    } else if hovered {
+    } else if response.hovered() {
         Color32::from_rgba_unmultiplied(255, 255, 255, 12)
     } else {
         Color32::TRANSPARENT
@@ -199,139 +195,6 @@ fn style_settings_menu_rows(ui: &mut egui::Ui) {
     open.fg_stroke.color = Color32::from_rgb(160, 214, 255);
 }
 
-fn show_settings_submenu<R>(
-    ui: &mut egui::Ui,
-    id_source: &'static str,
-    label: &str,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> Option<R> {
-    let popup_id = ui.make_persistent_id(id_source);
-    let button_id = ui.next_auto_id();
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        egui::Sense::hover(),
-    );
-    let mut is_open = ui.memory(|mem| mem.is_popup_open(popup_id));
-    let hovered = ui.input(|input| {
-        input
-            .pointer
-            .hover_pos()
-            .is_some_and(|pointer| rect.contains(pointer))
-    });
-    let visuals = if is_open {
-        ui.style().visuals.widgets.open
-    } else if hovered {
-        ui.style().visuals.widgets.hovered
-    } else {
-        ui.style().visuals.widgets.inactive
-    };
-    ui.painter().rect(
-        rect,
-        visuals.corner_radius,
-        visuals.weak_bg_fill,
-        visuals.bg_stroke,
-        egui::StrokeKind::Outside,
-    );
-    let content_rect = rect.shrink2(ui.spacing().button_padding);
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(content_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        |ui| {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(label)
-                        .monospace()
-                        .color(visuals.fg_stroke.color),
-                )
-                .selectable(false)
-                .sense(egui::Sense::empty()),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(">")
-                            .monospace()
-                            .color(visuals.fg_stroke.color),
-                    )
-                    .selectable(false)
-                    .sense(egui::Sense::empty()),
-                );
-            });
-        },
-    );
-    let response = ui
-        .interact(rect, button_id, egui::Sense::click())
-        .on_hover_cursor(CursorIcon::PointingHand);
-
-    if response.hovered() && !is_open {
-        ui.memory_mut(|mem| mem.open_popup(popup_id));
-        ui.ctx().request_repaint();
-        is_open = true;
-    }
-
-    let mut popup = None;
-    let mut popup_rect = None;
-    let button_rect = response.rect;
-
-    if is_open {
-        let frame = egui::Frame::menu(ui.style());
-        let pos = egui::pos2(
-            button_rect.right() + SETTINGS_SUBMENU_SPACING + SETTINGS_SUBMENU_OFFSET_X,
-            button_rect.top() - frame.total_margin().top,
-        );
-        let area = egui::Area::new(popup_id)
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .default_width(SETTINGS_SUBMENU_WIDTH);
-        let area_response = area.show(ui.ctx(), |ui| {
-            ui.set_width(SETTINGS_SUBMENU_WIDTH);
-            frame
-                .show(ui, |ui| {
-                    style_settings_menu_rows(ui);
-                    add_contents(ui)
-                })
-                .inner
-        });
-        popup_rect = Some(area_response.response.rect);
-        popup = Some(area_response.inner);
-    }
-
-    if is_open {
-        let mut keep_open = response.hovered();
-        if let Some(rect) = popup_rect {
-            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
-                keep_open |= rect.contains(pointer);
-                let bridge = egui::Rect::from_min_max(
-                    egui::pos2(button_rect.right(), button_rect.top()),
-                    egui::pos2(rect.left(), button_rect.bottom().max(rect.bottom())),
-                )
-                .expand(6.0);
-                keep_open |= bridge.contains(pointer);
-            }
-        }
-        if !keep_open && !ui.input(|input| input.pointer.any_down()) {
-            ui.memory_mut(|mem| {
-                if mem.is_popup_open(popup_id) {
-                    mem.close_popup();
-                }
-            });
-        }
-    }
-
-    popup
-}
-
-fn close_settings_submenu(ui: &mut egui::Ui, id_source: &'static str) {
-    let popup_id = ui.make_persistent_id(id_source);
-    ui.memory_mut(|mem| {
-        if mem.is_popup_open(popup_id) {
-            mem.close_popup();
-        }
-    });
-    ui.close_menu();
-}
-
 impl CodexAgentApp {
     fn show_status_button(&mut self, ui: &mut egui::Ui) {
         let enabled = !self.busy && !self.locked;
@@ -425,8 +288,8 @@ impl CodexAgentApp {
             ui.scope(|ui| {
                 style_settings_menu_rows(ui);
                 ui.spacing_mut().menu_spacing = SETTINGS_SUBMENU_SPACING;
-                let close_model_menu =
-                    show_settings_submenu(ui, "settings_model_submenu", "Model", |ui| {
+                let close_model_menu = ui
+                    .menu_button(RichText::new("Model").monospace(), |ui| {
                         ui.set_width(SETTINGS_SUBMENU_WIDTH);
                         let mut close_parent = false;
                         show_picker(ui, |ui| {
@@ -451,15 +314,13 @@ impl CodexAgentApp {
                         });
                         close_parent
                     })
+                    .inner
                     .unwrap_or(false);
                 if close_model_menu {
-                    close_settings_submenu(ui, "settings_model_submenu");
+                    ui.close_menu();
                 }
-                let close_notification_menu = show_settings_submenu(
-                    ui,
-                    "settings_notification_submenu",
-                    "Notification",
-                    |ui| {
+                let close_notification_menu = ui
+                    .menu_button(RichText::new("Notification").monospace(), |ui| {
                         ui.set_width(SETTINGS_SUBMENU_WIDTH);
                         let mut close_parent = false;
                         show_picker(ui, |ui| {
@@ -483,17 +344,14 @@ impl CodexAgentApp {
                             }
                         });
                         close_parent
-                    },
-                )
-                .unwrap_or(false);
+                    })
+                    .inner
+                    .unwrap_or(false);
                 if close_notification_menu {
-                    close_settings_submenu(ui, "settings_notification_submenu");
+                    ui.close_menu();
                 }
-                let close_context_menu = show_settings_submenu(
-                    ui,
-                    "settings_context_submenu",
-                    "Right Click Option",
-                    |ui| {
+                let close_context_menu = ui
+                    .menu_button(RichText::new("Right Click Option").monospace(), |ui| {
                         let add_description = match self.context_menu_state {
                             ContextMenuState::Checking => {
                                 "Add Explorer folder and background entries (checking registry...)"
@@ -552,11 +410,11 @@ impl CodexAgentApp {
                             }
                         });
                         close_parent
-                    },
-                )
-                .unwrap_or(false);
+                    })
+                    .inner
+                    .unwrap_or(false);
                 if close_context_menu {
-                    close_settings_submenu(ui, "settings_context_submenu");
+                    ui.close_menu();
                 }
             });
         });
