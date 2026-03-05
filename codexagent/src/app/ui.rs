@@ -69,9 +69,10 @@ fn show_picker_row(
         egui::vec2(ui.available_width(), SETTINGS_ROW_HEIGHT),
         egui::Sense::click(),
     );
+    let hovered = response.hovered();
     let fill = if selected {
         Color32::from_rgba_unmultiplied(124, 189, 255, 28)
-    } else if response.hovered() {
+    } else if hovered {
         Color32::from_rgba_unmultiplied(255, 255, 255, 12)
     } else {
         Color32::TRANSPARENT
@@ -147,7 +148,7 @@ fn show_picker_row(
                     )
                     .selectable(false)
                     .sense(egui::Sense::empty()),
-                );
+                )
             },
         );
     }
@@ -203,14 +204,21 @@ fn show_settings_submenu<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
     let popup_id = ui.make_persistent_id(id_source);
-    let (rect, response) = ui.allocate_exact_size(
+    let button_id = ui.next_auto_id();
+    let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
     let mut is_open = ui.memory(|mem| mem.is_popup_open(popup_id));
+    let hovered = ui.input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .is_some_and(|pointer| rect.contains(pointer))
+    });
     let visuals = if is_open {
         ui.style().visuals.widgets.open
-    } else if response.hovered() {
+    } else if hovered {
         ui.style().visuals.widgets.hovered
     } else {
         ui.style().visuals.widgets.inactive
@@ -250,7 +258,9 @@ fn show_settings_submenu<R>(
             });
         },
     );
-    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let response = ui
+        .interact(rect, button_id, egui::Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
 
     if response.hovered() && !is_open {
         ui.memory_mut(|mem| mem.open_popup(popup_id));
@@ -276,7 +286,7 @@ fn show_settings_submenu<R>(
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .default_width(SETTINGS_SUBMENU_WIDTH)
-            .sense(egui::Sense::hover());
+            .sense(egui::Sense::click());
         let area_response = area.show(ui.ctx(), |ui| {
             ui.set_width(SETTINGS_SUBMENU_WIDTH);
             frame
@@ -303,7 +313,7 @@ fn show_settings_submenu<R>(
                 keep_open |= bridge.contains(pointer);
             }
         }
-        if !keep_open {
+        if !keep_open && !ui.input(|input| input.pointer.any_down()) {
             ui.memory_mut(|mem| {
                 if mem.is_popup_open(popup_id) {
                     mem.close_popup();
@@ -488,20 +498,31 @@ impl CodexAgentApp {
                     "Right Click Option",
                     |ui| {
                         let add_description = match self.context_menu_state {
-                            ContextMenuState::Checking => "Checking current registry values...",
-                            ContextMenuState::Add => {
-                                "Current: folder and background right-click entries are active"
+                            ContextMenuState::Checking => {
+                                "Add Explorer folder and background entries (checking registry...)"
                             }
-                            _ => "Add Explorer folder and background entries",
+                            ContextMenuState::Add => {
+                                "Add Explorer folder and background entries (currently installed)"
+                            }
+                            ContextMenuState::Remove => {
+                                "Add Explorer folder and background entries"
+                            }
+                            ContextMenuState::Error => {
+                                "Add Explorer folder and background entries (state unknown)"
+                            }
                         };
                         let remove_description = match self.context_menu_state {
-                            ContextMenuState::Checking => "Checking current registry values...",
-                            ContextMenuState::Remove => {
-                                "Current: right-click entries are not installed"
+                            ContextMenuState::Checking => {
+                                "Remove Explorer folder and background entries (checking registry...)"
                             }
-                            ContextMenuState::Error => "Unable to read current registry values",
                             ContextMenuState::Add => {
                                 "Remove Explorer folder and background entries"
+                            }
+                            ContextMenuState::Remove => {
+                                "Remove Explorer folder and background entries (currently not installed)"
+                            }
+                            ContextMenuState::Error => {
+                                "Remove Explorer folder and background entries (state unknown)"
                             }
                         };
                         ui.set_width(SETTINGS_SUBMENU_WIDTH);
@@ -513,13 +534,11 @@ impl CodexAgentApp {
                                 "Add",
                                 add_description,
                                 false,
-                                self.context_menu_state == ContextMenuState::Add,
+                                false,
                             )
                             .clicked()
                             {
-                                if self.context_menu_state != ContextMenuState::Add {
-                                    self.select_context_menu(true);
-                                }
+                                self.select_context_menu(true);
                                 close_parent = true;
                             }
                             if show_picker_row(
@@ -527,13 +546,11 @@ impl CodexAgentApp {
                                 "Remove",
                                 remove_description,
                                 false,
-                                self.context_menu_state == ContextMenuState::Remove,
+                                false,
                             )
                             .clicked()
                             {
-                                if self.context_menu_state != ContextMenuState::Remove {
-                                    self.select_context_menu(false);
-                                }
+                                self.select_context_menu(false);
                                 close_parent = true;
                             }
                         });
@@ -1002,17 +1019,11 @@ impl eframe::App for CodexAgentApp {
                                     .show(ui, |ui| {
                                         ui.style_mut().override_font_id =
                                             Some(FontId::proportional(TEXT_FONT_SIZE));
-                                        let wrap_width = ui.available_width();
-                                        self.sync_input_galley(wrap_width);
-                                        let input_galley = self.input_galley.clone();
-                                        let input_galley_width = self.input_galley_width;
-                                        let mut layouter = cached_markdown_layouter(
-                                            input_galley,
-                                            input_galley_width,
-                                            &[],
-                                            0,
-                                            &[],
-                                        );
+                                        let mut layouter =
+                                            |ui: &egui::Ui, text: &str, width: f32| {
+                                                let job = markdown_layout_job(text, width, &[], 0, &[]);
+                                                ui.fonts(|fonts| fonts.layout_job(job))
+                                            };
                                         TextEdit::multiline(&mut self.input)
                                             .id_source(Self::INPUT_ID)
                                             .desired_width(f32::INFINITY)

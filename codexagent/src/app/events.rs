@@ -164,6 +164,12 @@ impl CodexAgentApp {
         };
         match result {
             Ok(_) => {
+                self.context_menu_state = if enabled {
+                    ContextMenuState::Add
+                } else {
+                    ContextMenuState::Remove
+                };
+                self.context_menu_refresh_pending = false;
                 self.refresh_context_menu_state_async();
                 self.ensure_output_spacing();
                 self.output.push_str("Context menu ");
