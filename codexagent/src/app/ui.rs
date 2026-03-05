@@ -23,8 +23,8 @@ const CANCEL_BUSY_BUTTON_WIDTH: f32 = CANCEL_BUTTON_WIDTH * 0.8;
 const SETTINGS_MENU_WIDTH: f32 = 360.0 * 0.4 * 1.2;
 const SETTINGS_SUBMENU_WIDTH: f32 = SETTINGS_MENU_WIDTH * 1.2 * 1.3 * 1.3;
 const SETTINGS_SUBMENU_PICKER_WIDTH: f32 = SETTINGS_SUBMENU_WIDTH;
-const SETTINGS_SUBMENU_SPACING: f32 = 34.0;
-const SETTINGS_SUBMENU_OFFSET_X: f32 = 10.0;
+const SETTINGS_SUBMENU_SPACING: f32 = 8.0;
+const SETTINGS_SUBMENU_OFFSET_X: f32 = 0.0;
 const SETTINGS_ROW_HEIGHT: f32 = 28.0;
 const SETTINGS_ROW_RADIUS: u8 = 8;
 const SETTINGS_ROW_PADDING_X: f32 = 8.0;
@@ -272,12 +272,7 @@ fn show_settings_submenu<R>(
 
     let mut popup = None;
     let mut popup_rect = None;
-    let mut popup_hovered = false;
-    let mut button_rect = response.rect;
-
-    if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
-        button_rect = to_global * button_rect;
-    }
+    let button_rect = response.rect;
 
     if is_open {
         let frame = egui::Frame::menu(ui.style());
@@ -288,8 +283,7 @@ fn show_settings_submenu<R>(
         let area = egui::Area::new(popup_id)
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
-            .default_width(SETTINGS_SUBMENU_WIDTH)
-            .sense(egui::Sense::hover());
+            .default_width(SETTINGS_SUBMENU_WIDTH);
         let area_response = area.show(ui.ctx(), |ui| {
             ui.set_width(SETTINGS_SUBMENU_WIDTH);
             frame
@@ -299,14 +293,12 @@ fn show_settings_submenu<R>(
                 })
                 .inner
         });
-        popup_hovered = area_response.response.hovered();
         popup_rect = Some(area_response.response.rect);
         popup = Some(area_response.inner);
     }
 
     if is_open {
         let mut keep_open = response.hovered();
-        keep_open |= popup_hovered;
         if let Some(rect) = popup_rect {
             if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
                 keep_open |= rect.contains(pointer);
