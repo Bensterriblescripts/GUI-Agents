@@ -14,6 +14,7 @@ pub(crate) struct RunningPrompt {
 #[derive(Default)]
 pub(crate) struct PromptStreamState {
     pub(crate) prompt_id: Option<u64>,
+    pub(crate) generation: u64,
     pub(crate) text: String,
 }
 
@@ -23,6 +24,7 @@ const MAX_IDLE_STREAM_CAPACITY: usize = 16 * 1024;
 impl PromptStreamState {
     pub(crate) fn start(&mut self, prompt_id: u64) {
         self.prompt_id = Some(prompt_id);
+        self.generation = self.generation.wrapping_add(1);
         self.text.clear();
     }
 
@@ -36,6 +38,7 @@ impl PromptStreamState {
         if text.starts_with(&self.text) {
             self.text.push_str(&text[self.text.len()..]);
         } else {
+            self.generation = self.generation.wrapping_add(1);
             self.text.clear();
             self.text.push_str(text);
         }
@@ -44,11 +47,16 @@ impl PromptStreamState {
 
     pub(crate) fn clear(&mut self, prompt_id: u64) {
         if self.prompt_id == Some(prompt_id) {
-            self.prompt_id = None;
-            self.text.clear();
-            if self.text.capacity() > MAX_IDLE_STREAM_CAPACITY {
-                self.text.shrink_to(RETAINED_STREAM_CAPACITY);
-            }
+            self.reset();
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.prompt_id = None;
+        self.generation = self.generation.wrapping_add(1);
+        self.text.clear();
+        if self.text.capacity() > MAX_IDLE_STREAM_CAPACITY {
+            self.text.shrink_to(RETAINED_STREAM_CAPACITY);
         }
     }
 }
@@ -105,5 +113,34 @@ fn clear_running_prompt(running_prompt: &Arc<Mutex<Option<RunningPrompt>>>, prom
     let mut active = running_prompt.lock().unwrap_or_else(|e| e.into_inner());
     if active.as_ref().is_some_and(|prompt| prompt.id == prompt_id) {
         *active = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PromptStreamState;
+
+    #[test]
+    fn update_appends_prefix_growth_without_replacing_generation() {
+        let mut state = PromptStreamState::default();
+        state.start(1);
+        let generation = state.generation;
+
+        assert!(state.update(1, "alpha"));
+        assert!(state.update(1, "alpha beta"));
+        assert_eq!(state.generation, generation);
+        assert_eq!(state.text, "alpha beta");
+    }
+
+    #[test]
+    fn update_bumps_generation_when_stream_restarts_from_new_snapshot() {
+        let mut state = PromptStreamState::default();
+        state.start(1);
+        state.update(1, "alpha beta");
+        let generation = state.generation;
+
+        assert!(state.update(1, "reset"));
+        assert_ne!(state.generation, generation);
+        assert_eq!(state.text, "reset");
     }
 }

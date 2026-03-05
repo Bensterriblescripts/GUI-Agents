@@ -137,45 +137,61 @@ impl CodexAgentApp {
         Some(state)
     }
 
+    #[cfg(target_os = "windows")]
+    fn outer_rect_to_native_rect(outer_rect: Rect) -> windows_sys::Win32::Foundation::RECT {
+        windows_sys::Win32::Foundation::RECT {
+            left: outer_rect.min.x.round() as i32,
+            top: outer_rect.min.y.round() as i32,
+            right: outer_rect.max.x.round() as i32,
+            bottom: outer_rect.max.y.round() as i32,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn current_monitor(
+        &self,
+        outer_rect: Option<Rect>,
+    ) -> Option<windows_sys::Win32::Graphics::Gdi::HMONITOR> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            MONITOR_DEFAULTTONEAREST, MonitorFromRect, MonitorFromWindow,
+        };
+
+        unsafe {
+            let monitor = if self.hwnd.is_null() {
+                let outer_rect = outer_rect?;
+                let rect = Self::outer_rect_to_native_rect(outer_rect);
+                MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST)
+            } else {
+                MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST)
+            };
+            (!monitor.is_null()).then_some(monitor)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn monitor_info(
+        &self,
+        outer_rect: Option<Rect>,
+    ) -> Option<windows_sys::Win32::Graphics::Gdi::MONITORINFO> {
+        use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+
+        let monitor = self.current_monitor(outer_rect)?;
+        unsafe {
+            let mut info: MONITORINFO = mem::zeroed();
+            info.cbSize = mem::size_of::<MONITORINFO>() as u32;
+            (GetMonitorInfoW(monitor, &mut info) != 0).then_some(info)
+        }
+    }
+
     fn monitor_key_from_outer_rect(&self, outer_rect: Option<Rect>) -> Option<MonitorKey> {
         #[cfg(target_os = "windows")]
         {
-            use windows_sys::Win32::Foundation::RECT;
-            use windows_sys::Win32::Graphics::Gdi::{
-                GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
-                MonitorFromWindow,
-            };
-
-            unsafe {
-                let monitor = if self.hwnd.is_null() {
-                    let outer_rect = outer_rect?;
-                    let rect = RECT {
-                        left: outer_rect.min.x.round() as i32,
-                        top: outer_rect.min.y.round() as i32,
-                        right: outer_rect.max.x.round() as i32,
-                        bottom: outer_rect.max.y.round() as i32,
-                    };
-                    MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST)
-                } else {
-                    MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST)
-                };
-                if monitor.is_null() {
-                    return None;
-                }
-
-                let mut info: MONITORINFO = mem::zeroed();
-                info.cbSize = mem::size_of::<MONITORINFO>() as u32;
-                if GetMonitorInfoW(monitor, &mut info) == 0 {
-                    return None;
-                }
-
-                Some(MonitorKey {
-                    left: info.rcMonitor.left,
-                    top: info.rcMonitor.top,
-                    right: info.rcMonitor.right,
-                    bottom: info.rcMonitor.bottom,
-                })
-            }
+            self.monitor_info(outer_rect).map(|info| MonitorKey {
+                left: info.rcMonitor.left,
+                top: info.rcMonitor.top,
+                right: info.rcMonitor.right,
+                bottom: info.rcMonitor.bottom,
+            })
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -401,37 +417,8 @@ impl CodexAgentApp {
 
     #[cfg(target_os = "windows")]
     fn monitor_work_area(&self) -> Option<windows_sys::Win32::Foundation::RECT> {
-        use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
-            MonitorFromWindow,
-        };
-
-        unsafe {
-            let monitor = if self.hwnd.is_null() {
-                let outer_rect = self.ctx.input(|input| input.viewport().outer_rect)?;
-                let rect = RECT {
-                    left: outer_rect.min.x.round() as i32,
-                    top: outer_rect.min.y.round() as i32,
-                    right: outer_rect.max.x.round() as i32,
-                    bottom: outer_rect.max.y.round() as i32,
-                };
-                MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST)
-            } else {
-                MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST)
-            };
-            if monitor.is_null() {
-                return None;
-            }
-
-            let mut info: MONITORINFO = mem::zeroed();
-            info.cbSize = mem::size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(monitor, &mut info) == 0 {
-                return None;
-            }
-
-            Some(info.rcWork)
-        }
+        let outer_rect = self.ctx.input(|input| input.viewport().outer_rect);
+        self.monitor_info(outer_rect).map(|info| info.rcWork)
     }
 
     #[cfg(target_os = "windows")]
@@ -439,12 +426,7 @@ impl CodexAgentApp {
         let rect = self.window_rect().or_else(|| {
             self.ctx
                 .input(|input| input.viewport().outer_rect)
-                .map(|outer_rect| windows_sys::Win32::Foundation::RECT {
-                    left: outer_rect.min.x.round() as i32,
-                    top: outer_rect.min.y.round() as i32,
-                    right: outer_rect.max.x.round() as i32,
-                    bottom: outer_rect.max.y.round() as i32,
-                })
+                .map(Self::outer_rect_to_native_rect)
         })?;
         let work_area = self.monitor_work_area()?;
         let outer_extra =

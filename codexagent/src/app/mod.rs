@@ -8,6 +8,7 @@ mod window;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io;
+use std::process::ChildStdin;
 use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use crate::config::{
     APP_NAME, DEFAULT_NOTIFICATIONS_ENABLED, LINE_HEIGHT, PENDING_ANIMATION_INTERVAL,
     PromptHistory, load_notifications_enabled, load_prompt_history, save_prompt_history,
-    trim_prompt_history,
+    save_prompt_history_prompts, trim_prompt_history,
 };
 use crate::events::AppEvent;
 use crate::logging;
@@ -25,6 +26,22 @@ use crate::prompt::{PromptStreamState, RunningPrompt};
 use crate::runtime::{current_cwd_text, current_model, set_window_app_id};
 
 use self::render::{OutputLineKind, append_output_display, pending_dots, prepare_output_display};
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum SetupState {
+    Checking,
+    Ready,
+    Installing,
+    InstallFailed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ContextMenuState {
+    Checking,
+    Add,
+    Remove,
+    Error,
+}
 
 const RETAINED_RENDER_CAPACITY: usize = 1024;
 const MAX_IDLE_RENDER_CAPACITY: usize = 16 * 1024;
@@ -42,7 +59,7 @@ pub(super) struct SlashCommand {
 pub(super) const SLASH_COMMANDS: [SlashCommand; 1] = [SlashCommand {
     label: "/status",
     name: "status",
-    description: "Show rate-limit status",
+    description: "Show local rate-limit status",
 }];
 
 pub(super) struct ModelOption {
@@ -123,12 +140,12 @@ pub(crate) struct CodexAgentApp {
     output: String,
     current_model: String,
     notifications_enabled: bool,
+    context_menu_state: ContextMenuState,
+    context_menu_refresh_pending: bool,
     render_buffer: String,
     output_display_buffer: String,
     output_display_prompt_ranges: Vec<(usize, usize)>,
     output_display_line_kinds: Vec<(usize, OutputLineKind)>,
-    output_display_points: Vec<(usize, usize)>,
-    output_display_mapped_points: Vec<usize>,
     output_display_response_start: usize,
     output_display_response_chars: usize,
     output_display_base_len: usize,
@@ -157,6 +174,7 @@ pub(crate) struct CodexAgentApp {
     active_prompt_id: Option<u64>,
     pending_input_focus: bool,
     picker_selection: Option<usize>,
+    settings_menu_open: bool,
     was_focused: bool,
     drag_armed: bool,
     window_dragging: bool,
@@ -180,8 +198,12 @@ pub(crate) struct CodexAgentApp {
     running_prompt: Arc<Mutex<Option<RunningPrompt>>>,
     shared_stream: Arc<Mutex<PromptStreamState>>,
     stream_notification_pending: Arc<AtomicBool>,
+    stream_generation: u64,
+    stream_visible_len: usize,
     session_id: Option<String>,
     cancelled_resume_context: Option<String>,
+    setup_state: SetupState,
+    install_stdin: Arc<Mutex<Option<ChildStdin>>>,
     positioned: bool,
     title_set: bool,
     hwnd: *mut c_void,
@@ -219,12 +241,12 @@ impl CodexAgentApp {
             output: String::new(),
             current_model: current_model(),
             notifications_enabled,
+            context_menu_state: ContextMenuState::Checking,
+            context_menu_refresh_pending: false,
             render_buffer: String::new(),
             output_display_buffer: String::new(),
             output_display_prompt_ranges: Vec::new(),
             output_display_line_kinds: Vec::new(),
-            output_display_points: Vec::new(),
-            output_display_mapped_points: Vec::new(),
             output_display_response_start: 0,
             output_display_response_chars: 0,
             output_display_base_len: 0,
@@ -252,6 +274,7 @@ impl CodexAgentApp {
             active_prompt_id: None,
             pending_input_focus: true,
             picker_selection: None,
+            settings_menu_open: false,
             was_focused: false,
             drag_armed: false,
             window_dragging: false,
@@ -275,8 +298,12 @@ impl CodexAgentApp {
             running_prompt: Arc::new(Mutex::new(None)),
             shared_stream: Arc::new(Mutex::new(PromptStreamState::default())),
             stream_notification_pending: Arc::new(AtomicBool::new(false)),
+            stream_generation: 0,
+            stream_visible_len: 0,
             session_id: None,
             cancelled_resume_context: None,
+            setup_state: SetupState::Ready,
+            install_stdin: Arc::new(Mutex::new(None)),
             positioned: false,
             title_set: false,
             hwnd: {
@@ -311,7 +338,9 @@ impl CodexAgentApp {
     }
 
     pub(super) fn can_clear(&self) -> bool {
-        !self.busy && (!self.output.is_empty() || self.session_id.is_some())
+        !self.busy
+            && self.setup_state == SetupState::Ready
+            && (!self.output.is_empty() || self.session_id.is_some())
     }
 
     pub(super) fn clear_session(&mut self) {
@@ -322,8 +351,6 @@ impl CodexAgentApp {
         self.prompt_ranges.clear();
         self.output_display_prompt_ranges.clear();
         self.output_display_line_kinds.clear();
-        self.output_display_points.clear();
-        self.output_display_mapped_points.clear();
         self.output_display_response_start = 0;
         self.output_display_response_chars = 0;
         self.output_display_base_len = 0;
@@ -343,9 +370,9 @@ impl CodexAgentApp {
         self.clear_render_buffer();
         {
             let mut stream = self.shared_stream.lock().unwrap_or_else(|e| e.into_inner());
-            stream.prompt_id = None;
-            stream.text.clear();
+            stream.reset();
         }
+        self.reset_stream_progress();
         self.persist_history();
         self.refresh_after_text_change();
     }
@@ -481,6 +508,11 @@ impl CodexAgentApp {
         self.picker_selection = None;
     }
 
+    pub(super) fn reset_stream_progress(&mut self) {
+        self.stream_generation = 0;
+        self.stream_visible_len = 0;
+    }
+
     pub(super) fn reset_prompt_history_navigation(&mut self) {
         self.prompt_history_index = None;
         self.prompt_history_draft = None;
@@ -596,6 +628,11 @@ impl CodexAgentApp {
 
     pub(super) fn sync_output_display_buffer(&mut self) {
         if self.output_display_dirty {
+            truncate_output_display_suffix(
+                &mut self.output_display_buffer,
+                self.output_display_base_len,
+                &mut self.output_display_busy,
+            );
             if self.output_display_can_append && self.output.len() >= self.output_display_source_len
             {
                 let previous_len = self.output_display_source_len;
@@ -621,8 +658,6 @@ impl CodexAgentApp {
                     &mut self.output_display_buffer,
                     &mut self.output_display_prompt_ranges,
                     &mut self.output_display_line_kinds,
-                    &mut self.output_display_points,
-                    &mut self.output_display_mapped_points,
                 );
                 self.output_display_response_chars = self.output_display_buffer
                     [..self.output_display_response_start]
@@ -654,19 +689,18 @@ impl CodexAgentApp {
             return;
         }
         if self.output_display_busy {
-            self.output_display_buffer
-                .truncate(self.output_display_base_len);
-            self.output_display_busy = false;
+            truncate_output_display_suffix(
+                &mut self.output_display_buffer,
+                self.output_display_base_len,
+                &mut self.output_display_busy,
+            );
             self.output_galley = None;
             self.output_separator_y = None;
         }
     }
 
     pub(super) fn persist_history(&self) {
-        let history = PromptHistory {
-            prompts: self.prompt_history.clone(),
-        };
-        if let Err(error) = save_prompt_history(&history) {
+        if let Err(error) = save_prompt_history_prompts(&self.prompt_history) {
             logging::error(format!("failed to save prompt history: {}", error));
         }
     }
@@ -704,6 +738,14 @@ fn creation_hwnd(cc: &eframe::CreationContext<'_>) -> *mut c_void {
         Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as *mut c_void,
         _ => std::ptr::null_mut(),
     }
+}
+
+fn truncate_output_display_suffix(buffer: &mut String, base_len: usize, busy: &mut bool) {
+    if !*busy {
+        return;
+    }
+    buffer.truncate(base_len);
+    *busy = false;
 }
 
 fn build_resume_context(output: &str, prompt_ranges: &[(usize, usize)]) -> String {
@@ -764,7 +806,9 @@ fn append_resume_response(transcript: &mut String, response: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_resume_context;
+    use super::{
+        build_resume_context, render::append_output_display, truncate_output_display_suffix,
+    };
 
     #[test]
     fn build_resume_context_preserves_turns_and_reasoning() {
@@ -783,5 +827,17 @@ mod tests {
             transcript,
             "User:\nfirst prompt\n\nAssistant reasoning:\nthinking\n\nAssistant:\nanswer\n\nUser:\nsecond prompt\n\nAssistant note:\nPlanning...\n\nAssistant:\nfinal"
         );
+    }
+
+    #[test]
+    fn appended_output_replaces_busy_suffix() {
+        let mut display = String::from("working\n... loading");
+        let mut busy = true;
+
+        truncate_output_display_suffix(&mut display, "working\n".len(), &mut busy);
+        append_output_display("next line\n", true, &mut display, &mut Vec::new());
+
+        assert_eq!(display, "working\nnext line\n");
+        assert!(!busy);
     }
 }

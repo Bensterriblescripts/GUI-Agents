@@ -1,8 +1,9 @@
 #![cfg(windows)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::c_void;
+use std::ffi::{OsStr, OsString, c_void};
 use std::mem::size_of;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
@@ -307,7 +308,7 @@ unsafe extern "system" fn explorer_command_get_icon(
         }
         return E_FAIL;
     };
-    alloc_out_string(&path.display().to_string(), name)
+    alloc_out_os_str(path.as_os_str(), name)
 }
 
 unsafe extern "system" fn explorer_command_get_tool_tip(
@@ -361,21 +362,37 @@ unsafe extern "system" fn explorer_command_enum_sub_commands(
 }
 
 unsafe fn alloc_out_string(value: &str, out: *mut PWSTR) -> HRESULT {
+    alloc_out_wide(value.encode_utf16(), value.encode_utf16().count(), out)
+}
+
+unsafe fn alloc_out_os_str(value: &OsStr, out: *mut PWSTR) -> HRESULT {
+    alloc_out_wide(value.encode_wide(), value.encode_wide().count(), out)
+}
+
+unsafe fn alloc_out_wide<I>(wide: I, len: usize, out: *mut PWSTR) -> HRESULT
+where
+    I: Iterator<Item = u16>,
+{
     if out.is_null() {
         return E_POINTER;
     }
-    *out = alloc_wide(value);
+    *out = alloc_wide(wide, len);
     if (*out).is_null() { E_FAIL } else { S_OK }
 }
 
-unsafe fn alloc_wide(value: &str) -> PWSTR {
-    let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes = wide.len() * size_of::<u16>();
+unsafe fn alloc_wide<I>(wide: I, len: usize) -> PWSTR
+where
+    I: Iterator<Item = u16>,
+{
+    let bytes = (len + 1) * size_of::<u16>();
     let ptr = CoTaskMemAlloc(bytes) as *mut u16;
     if ptr.is_null() {
         return null_mut();
     }
-    std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+    for (index, unit) in wide.enumerate() {
+        *ptr.add(index) = unit;
+    }
+    *ptr.add(len) = 0;
     ptr
 }
 
@@ -457,7 +474,7 @@ fn codex_exe_path() -> Option<PathBuf> {
     }
     buffer.truncate(len);
 
-    let mut path = PathBuf::from(String::from_utf16_lossy(&buffer));
+    let mut path = PathBuf::from(OsString::from_wide(&buffer));
     path.set_file_name("codexagent.exe");
     Some(path)
 }
@@ -485,7 +502,7 @@ fn quote_arg(value: &str) -> String {
         return value.to_owned();
     }
 
-    let mut quoted = String::with_capacity(value.len() + 2);
+    let mut quoted = String::with_capacity(quoted_arg_capacity(value));
     quoted.push('"');
     let mut backslashes = 0usize;
 
@@ -493,13 +510,13 @@ fn quote_arg(value: &str) -> String {
         match ch {
             '\\' => backslashes += 1,
             '"' => {
-                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                push_backslashes(&mut quoted, backslashes * 2 + 1);
                 quoted.push('"');
                 backslashes = 0;
             }
             _ => {
                 if backslashes != 0 {
-                    quoted.push_str(&"\\".repeat(backslashes));
+                    push_backslashes(&mut quoted, backslashes);
                     backslashes = 0;
                 }
                 quoted.push(ch);
@@ -508,9 +525,32 @@ fn quote_arg(value: &str) -> String {
     }
 
     if backslashes != 0 {
-        quoted.push_str(&"\\".repeat(backslashes * 2));
+        push_backslashes(&mut quoted, backslashes * 2);
     }
 
     quoted.push('"');
     quoted
+}
+
+fn quoted_arg_capacity(value: &str) -> usize {
+    let mut extra = 2usize;
+    let mut backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                extra += backslashes + 1;
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+    value.len() + extra + backslashes
+}
+
+fn push_backslashes(out: &mut String, count: usize) {
+    out.reserve(count);
+    for _ in 0..count {
+        out.push('\\');
+    }
 }

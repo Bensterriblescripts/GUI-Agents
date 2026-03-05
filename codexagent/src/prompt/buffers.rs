@@ -15,19 +15,18 @@ enum SegmentStyle {
     Streaming,
 }
 
+#[derive(Clone, Copy)]
 struct Segment {
     kind: SegmentKind,
     style: SegmentStyle,
-    raw_start: usize,
-    raw_end: usize,
     display_start: usize,
 }
 
 #[derive(Default)]
 pub(super) struct ResponseBuffers {
     segments: Vec<Segment>,
-    raw: String,
     display: String,
+    last_text: String,
 }
 
 impl ResponseBuffers {
@@ -50,12 +49,12 @@ impl ResponseBuffers {
         }
         if let Some(last) = self.last_segment() {
             if last.kind == kind {
-                let last_text = self.segment_text(last);
+                let last_text = self.last_segment_text();
                 if last_text == text || last_text.ends_with(text) {
                     return;
                 }
                 if text.starts_with(last_text) {
-                    self.replace_last_segment_text(text, SegmentStyle::Block);
+                    self.extend_last_segment_text(text, SegmentStyle::Block);
                     return;
                 }
                 if kind == SegmentKind::Agent && agent_fragment_matches(last_text, text) {
@@ -82,7 +81,7 @@ impl ResponseBuffers {
         }
         if let Some(last) = self.last_segment() {
             if last.kind == SegmentKind::Reasoning {
-                let last_text = self.segment_text(last);
+                let last_text = self.last_segment_text();
                 let existing = last_text.strip_suffix("...").unwrap_or(last_text);
                 if existing.ends_with(content) {
                     return;
@@ -111,7 +110,7 @@ impl ResponseBuffers {
         }
         if let Some(last) = self.last_segment() {
             if last.kind == kind {
-                let last_text = self.segment_text(last);
+                let last_text = self.last_segment_text();
                 let existing = if kind == SegmentKind::Reasoning {
                     last_text.strip_suffix("...").unwrap_or(last_text)
                 } else {
@@ -121,9 +120,21 @@ impl ResponseBuffers {
                     return;
                 }
                 if text.starts_with(existing) {
-                    self.replace_last_segment_text(text, SegmentStyle::Streaming);
+                    if kind != SegmentKind::Reasoning && last_text == existing {
+                        self.extend_last_segment_text(text, SegmentStyle::Streaming);
+                    } else {
+                        self.replace_last_segment_text(text, SegmentStyle::Streaming);
+                    }
                 } else {
-                    self.append_to_last_segment_text(existing.len(), text, SegmentStyle::Streaming);
+                    if kind != SegmentKind::Reasoning && last_text.len() == existing.len() {
+                        self.extend_last_segment_suffix(text, SegmentStyle::Streaming);
+                    } else {
+                        self.append_to_last_segment_text(
+                            existing.len(),
+                            text,
+                            SegmentStyle::Streaming,
+                        );
+                    }
                 }
                 return;
             }
@@ -161,8 +172,8 @@ impl ResponseBuffers {
         self.segments.last()
     }
 
-    fn segment_text<'a>(&'a self, segment: &Segment) -> &'a str {
-        &self.raw[segment.raw_start..segment.raw_end]
+    fn last_segment_text(&self) -> &str {
+        &self.last_text
     }
 
     fn append_segment(&mut self, kind: SegmentKind, style: SegmentStyle, text: &str) {
@@ -176,23 +187,12 @@ impl ResponseBuffers {
         text: &str,
         suffix: &str,
     ) {
-        let raw_start = self.raw.len();
-        self.raw.reserve(text.len() + suffix.len());
-        self.raw.push_str(text);
-        self.raw.push_str(suffix);
-        let raw_end = self.raw.len();
         let display_start = self.display.len();
-        append_segment_display(
-            &mut self.display,
-            kind,
-            style,
-            &self.raw[raw_start..raw_end],
-        );
+        self.set_last_segment_text(text, suffix);
+        append_segment_display(&mut self.display, kind, style, &self.last_text);
         self.segments.push(Segment {
             kind,
             style,
-            raw_start,
-            raw_end,
             display_start,
         });
     }
@@ -201,31 +201,51 @@ impl ResponseBuffers {
         self.rewrite_last_segment(style, 0, text);
     }
 
+    fn extend_last_segment_text(&mut self, text: &str, style: SegmentStyle) {
+        if self.segments.is_empty() {
+            return;
+        }
+        let Some(suffix) = text.strip_prefix(self.last_segment_text()) else {
+            self.replace_last_segment_text(text, style);
+            return;
+        };
+        self.extend_last_segment_suffix(suffix, style);
+    }
+
+    fn extend_last_segment_suffix(&mut self, suffix: &str, style: SegmentStyle) {
+        let Some(last) = self.segments.last().copied() else {
+            return;
+        };
+        if suffix.is_empty() {
+            if let Some(last) = self.segments.last_mut() {
+                last.style = style;
+            }
+            return;
+        }
+
+        let line_start =
+            self.last_text.is_empty() || self.last_text.as_bytes().last() == Some(&b'\n');
+        self.last_text.push_str(suffix);
+        append_segment_display_continuation(&mut self.display, last.kind, line_start, suffix);
+
+        if let Some(last) = self.segments.last_mut() {
+            last.style = style;
+        }
+    }
+
     fn replace_last_segment_with_suffix(&mut self, text: &str, suffix: &str, style: SegmentStyle) {
         let Some(last) = self.segments.last() else {
             return;
         };
         let kind = last.kind;
-        let raw_start = last.raw_start;
         let display_start = last.display_start;
 
-        self.raw.truncate(raw_start);
-        self.raw.reserve(text.len() + suffix.len());
-        self.raw.push_str(text);
-        self.raw.push_str(suffix);
-        let raw_end = self.raw.len();
-
+        self.set_last_segment_text(text, suffix);
         self.display.truncate(display_start);
-        append_segment_display(
-            &mut self.display,
-            kind,
-            style,
-            &self.raw[raw_start..raw_end],
-        );
+        append_segment_display(&mut self.display, kind, style, &self.last_text);
 
         if let Some(last) = self.segments.last_mut() {
             last.style = style;
-            last.raw_end = raw_end;
         }
     }
 
@@ -243,25 +263,23 @@ impl ResponseBuffers {
             return;
         };
         let kind = last.kind;
-        let raw_start = last.raw_start;
         let display_start = last.display_start;
 
-        self.raw.truncate(raw_start + prefix_len);
-        self.raw.push_str(suffix);
-        let raw_end = self.raw.len();
-
+        self.last_text.truncate(prefix_len);
+        self.last_text.push_str(suffix);
         self.display.truncate(display_start);
-        append_segment_display(
-            &mut self.display,
-            kind,
-            style,
-            &self.raw[raw_start..raw_end],
-        );
+        append_segment_display(&mut self.display, kind, style, &self.last_text);
 
         if let Some(last) = self.segments.last_mut() {
             last.style = style;
-            last.raw_end = raw_end;
         }
+    }
+
+    fn set_last_segment_text(&mut self, text: &str, suffix: &str) {
+        self.last_text.clear();
+        self.last_text.reserve(text.len() + suffix.len());
+        self.last_text.push_str(text);
+        self.last_text.push_str(suffix);
     }
 }
 
@@ -402,9 +420,34 @@ fn rendered_capacity(display: &str, style: SegmentStyle, text: &str, kind: Segme
 }
 
 fn append_marked(display: &mut String, marker: char, text: &str) {
+    append_marked_continuation(display, marker, true, text);
+}
+
+fn append_segment_display_continuation(
+    display: &mut String,
+    kind: SegmentKind,
+    line_start: bool,
+    text: &str,
+) {
+    match kind {
+        SegmentKind::Plain => display.push_str(text),
+        SegmentKind::Agent => append_marked_continuation(display, '\x1F', line_start, text),
+        SegmentKind::Reasoning => append_marked_continuation(display, '\x1E', line_start, text),
+    }
+}
+
+fn append_marked_continuation(
+    display: &mut String,
+    marker: char,
+    mut line_start: bool,
+    text: &str,
+) {
     for line in text.split_inclusive('\n') {
-        display.push(marker);
+        if line_start {
+            display.push(marker);
+        }
         display.push_str(line);
+        line_start = line.ends_with('\n');
     }
 }
 

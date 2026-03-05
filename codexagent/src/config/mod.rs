@@ -14,7 +14,7 @@ pub(crate) const WINDOW_PADDING: f32 = 36.0;
 pub(crate) const WINDOW_BOTTOM_PADDING: f32 = 44.0;
 pub(crate) const LINE_HEIGHT: f32 = 20.0;
 pub(crate) const TEXT_FONT_SIZE: f32 = 14.0;
-pub(crate) const AUTO_EXPAND_VISIBLE_ROWS: usize = 40;
+pub(crate) const AUTO_EXPAND_VISIBLE_ROWS: usize = 120;
 pub(crate) const MAX_VISIBLE_ROWS: usize = 160;
 pub(crate) const DEFAULT_WINDOW_WIDTH: f32 = 864.0;
 pub(crate) const DEFAULT_WINDOW_HEIGHT: f32 =
@@ -157,11 +157,15 @@ pub(crate) fn load_prompt_history() -> io::Result<PromptHistory> {
 }
 
 pub(crate) fn save_prompt_history(history: &PromptHistory) -> io::Result<()> {
+    save_prompt_history_prompts(&history.prompts)
+}
+
+pub(crate) fn save_prompt_history_prompts(prompts: &[String]) -> io::Result<()> {
     let path = Path::new(PROMPT_HISTORY_PATH);
     logging::log_result(
         overwrite_config(
             Path::new(PROMPT_HISTORY_PATH),
-            &prompt_history_to_settings(history),
+            &prompt_history_to_settings_slice(prompts),
         ),
         |error| {
             format!(
@@ -245,7 +249,10 @@ fn overwrite_config(path: &Path, current: &HashMap<String, String>) -> io::Resul
     let mut keys: Vec<_> = current.keys().collect();
     keys.sort_unstable();
 
-    let mut buffer = String::new();
+    let total_len = keys.iter().fold(0usize, |len, key| {
+        len + key.len() + 1 + current.get(*key).map_or(0, String::len) + 1
+    });
+    let mut buffer = String::with_capacity(total_len);
     for key in keys {
         if let Some(value) = current.get(key) {
             buffer.push_str(key);
@@ -272,20 +279,25 @@ fn ensure_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn prompt_history_to_settings(history: &PromptHistory) -> HashMap<String, String> {
-    let mut settings = HashMap::new();
+    prompt_history_to_settings_slice(&history.prompts)
+}
 
-    if !history.prompts.is_empty() {
-        settings.insert(
-            "prompts_hex".to_owned(),
-            history
-                .prompts
-                .iter()
-                .map(|prompt| encode_hex(prompt.as_bytes()))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+fn prompt_history_to_settings_slice(prompts: &[String]) -> HashMap<String, String> {
+    let mut settings = HashMap::with_capacity((!prompts.is_empty()) as usize);
+
+    if !prompts.is_empty() {
+        let mut prompts_hex = String::with_capacity(prompt_history_hex_len(prompts));
+        for (index, prompt) in prompts.iter().enumerate() {
+            if index != 0 {
+                prompts_hex.push(',');
+            }
+            append_hex(&mut prompts_hex, prompt.as_bytes());
+        }
+        settings.insert("prompts_hex".to_owned(), prompts_hex);
     }
+
     settings
 }
 
@@ -402,14 +414,24 @@ fn legacy_prompt_history_entries(settings: &HashMap<String, String>) -> io::Resu
     prompt_history_entries_from_output(&output, &prompt_ranges)
 }
 
+#[cfg(test)]
 fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
+    append_hex(&mut out, bytes);
+    out
+}
+
+fn append_hex(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.reserve(bytes.len() * 2);
     for byte in bytes {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    out
+}
+
+fn prompt_history_hex_len(prompts: &[String]) -> usize {
+    prompts.iter().map(|prompt| prompt.len() * 2).sum::<usize>() + prompts.len().saturating_sub(1)
 }
 
 fn decode_hex_to_string(value: &str) -> io::Result<String> {

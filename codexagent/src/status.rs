@@ -3,9 +3,9 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
-use time::OffsetDateTime;
+use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::logging;
 
@@ -23,13 +23,17 @@ pub(crate) fn current_usage_text() -> String {
 struct RateLimit {
     used_percent: f64,
     window_minutes: u64,
+    resets_at: Option<OffsetDateTime>,
 }
 
 impl RateLimit {
-    fn from_value(value: &Value) -> Option<Self> {
+    fn from_raw(value: RawRateLimit) -> Option<Self> {
         Some(Self {
-            used_percent: value.get("used_percent")?.as_f64()?,
-            window_minutes: value.get("window_minutes")?.as_u64()?,
+            used_percent: value.used_percent?,
+            window_minutes: value.window_minutes?,
+            resets_at: value
+                .resets_at
+                .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok()),
         })
     }
 }
@@ -43,6 +47,38 @@ struct UsageStatus {
 struct RateLimitStatus {
     timestamp: OffsetDateTime,
     limits: UsageStatus,
+}
+
+#[derive(Deserialize)]
+struct SessionEvent<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<&'a str>,
+    #[serde(borrow)]
+    timestamp: Option<&'a str>,
+    #[serde(borrow)]
+    payload: Option<SessionPayload<'a>>,
+}
+
+#[derive(Deserialize)]
+struct SessionPayload<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<&'a str>,
+    #[serde(borrow)]
+    timestamp: Option<&'a str>,
+    rate_limits: Option<RawUsageStatus>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct RawRateLimit {
+    used_percent: Option<f64>,
+    window_minutes: Option<u64>,
+    resets_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RawUsageStatus {
+    primary: Option<RawRateLimit>,
+    secondary: Option<RawRateLimit>,
 }
 
 fn collect_usage() -> io::Result<UsageStatus> {
@@ -130,10 +166,19 @@ fn read_session_usage(path: &Path) -> io::Result<Option<RateLimitStatus>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut latest = None;
+    let mut line = String::new();
+    let mut reader = reader;
 
-    for line in reader.lines() {
-        let line = line?;
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<SessionEvent<'_>>(trimmed) else {
             continue;
         };
         let Some(status) = session_rate_limits(&value) else {
@@ -150,27 +195,24 @@ fn read_session_usage(path: &Path) -> io::Result<Option<RateLimitStatus>> {
     Ok(latest)
 }
 
-fn session_timestamp(value: &Value) -> Option<OffsetDateTime> {
-    let timestamp = value.get("timestamp").and_then(Value::as_str).or_else(|| {
-        value
-            .get("payload")
-            .and_then(|payload| payload.get("timestamp"))
-            .and_then(Value::as_str)
-    })?;
+fn session_timestamp(value: &SessionEvent<'_>) -> Option<OffsetDateTime> {
+    let timestamp = value
+        .timestamp
+        .or_else(|| value.payload.as_ref().and_then(|payload| payload.timestamp))?;
     OffsetDateTime::parse(timestamp, &Rfc3339).ok()
 }
 
-fn session_rate_limits(value: &Value) -> Option<RateLimitStatus> {
-    if value.get("type")?.as_str()? != "event_msg" {
+fn session_rate_limits(value: &SessionEvent<'_>) -> Option<RateLimitStatus> {
+    if value.kind? != "event_msg" {
         return None;
     }
-    let payload = value.get("payload")?;
-    if payload.get("type")?.as_str()? != "token_count" {
+    let payload = value.payload.as_ref()?;
+    if payload.kind? != "token_count" {
         return None;
     }
-    let rate_limits = payload.get("rate_limits")?;
-    let primary = rate_limits.get("primary").and_then(RateLimit::from_value);
-    let secondary = rate_limits.get("secondary").and_then(RateLimit::from_value);
+    let rate_limits = payload.rate_limits.as_ref()?;
+    let primary = rate_limits.primary.and_then(RateLimit::from_raw);
+    let secondary = rate_limits.secondary.and_then(RateLimit::from_raw);
     if primary.is_none() && secondary.is_none() {
         return None;
     }
@@ -181,40 +223,85 @@ fn session_rate_limits(value: &Value) -> Option<RateLimitStatus> {
 }
 
 fn format_status(status: UsageStatus) -> String {
+    let now = OffsetDateTime::now_utc();
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    format_status_at(status, now, local_offset)
+}
+
+fn format_status_at(status: UsageStatus, now: OffsetDateTime, local_offset: UtcOffset) -> String {
     if status.primary.is_none() && status.secondary.is_none() {
         return "No local rate-limit status found.".to_owned();
     }
 
     let mut lines = String::new();
     if let Some(primary) = status.primary {
-        lines.push_str(&format_limit("Daily", primary));
+        lines.push_str(&format_limit("Daily:", primary, now, local_offset));
     }
     if let Some(secondary) = status.secondary {
         if !lines.is_empty() {
             lines.push('\n');
         }
-        lines.push_str(&format_limit("Weekly", secondary));
+        lines.push_str(&format_limit("Weekly:", secondary, now, local_offset));
     }
     lines
 }
 
-fn format_limit(label: &str, limit: RateLimit) -> String {
+fn format_limit(
+    label: &str,
+    limit: RateLimit,
+    now: OffsetDateTime,
+    local_offset: UtcOffset,
+) -> String {
     format!(
-        "{} (Resets in {}): {}",
-        label,
-        format_window(limit.window_minutes),
+        "`{label:<7} {} remaining ({})`",
         format_percent((100.0 - limit.used_percent).clamp(0.0, 100.0)),
+        format_reset(limit, now, local_offset),
     )
 }
 
-fn format_window(minutes: u64) -> String {
-    if minutes % (24 * 60) == 0 {
-        return format!("{}d", minutes / (24 * 60));
+fn format_reset(limit: RateLimit, now: OffsetDateTime, local_offset: UtcOffset) -> String {
+    if let Some(resets_at) = limit.resets_at {
+        let remaining_seconds = (resets_at - now).whole_seconds().max(0);
+        return if remaining_seconds == 0 {
+            "Resets now".to_owned()
+        } else {
+            format!("Resets at {}", format_local_time(resets_at, local_offset))
+        };
     }
-    if minutes % 60 == 0 {
-        return format!("{}h", minutes / 60);
+    format!("Window {}", format_duration_minutes(limit.window_minutes))
+}
+
+fn format_local_time(datetime: OffsetDateTime, local_offset: UtcOffset) -> String {
+    let local = datetime.to_offset(local_offset);
+    let hour = local.hour();
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    format!("{}:{:02} {}", display_hour, local.minute(), suffix)
+}
+
+fn format_duration_minutes(minutes: u64) -> String {
+    let days = minutes / (24 * 60);
+    let hours = (minutes % (24 * 60)) / 60;
+    let mins = minutes % 60;
+    if days > 0 && hours == 0 && mins == 0 {
+        return format!("{}d", days);
     }
-    format!("{}m", minutes)
+    if days == 0 && hours > 0 && mins == 0 {
+        return format!("{}h", hours);
+    }
+    if days == 0 && hours == 0 {
+        return format!("{}m", mins);
+    }
+    if days == 0 {
+        return format!("{}h {}m", hours, mins);
+    }
+    if mins == 0 {
+        return format!("{}d {}h", days, hours);
+    }
+    format!("{}d {}h {}m", days, hours, mins)
 }
 
 fn format_percent(value: f64) -> String {
@@ -226,13 +313,24 @@ fn format_percent(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RateLimit, format_percent, format_status, format_window};
+    use serde_json::json;
+    use time::{OffsetDateTime, UtcOffset};
+
+    use super::{
+        RateLimit, format_duration_minutes, format_percent, format_status_at, session_rate_limits,
+    };
+
+    fn unix(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(seconds).expect("valid unix timestamp")
+    }
 
     #[test]
-    fn formats_window_labels() {
-        assert_eq!(format_window(300), "5h");
-        assert_eq!(format_window(10080), "7d");
-        assert_eq!(format_window(45), "45m");
+    fn formats_duration_labels() {
+        assert_eq!(format_duration_minutes(300), "5h");
+        assert_eq!(format_duration_minutes(10080), "7d");
+        assert_eq!(format_duration_minutes(45), "45m");
+        assert_eq!(format_duration_minutes(92), "1h 32m");
+        assert_eq!(format_duration_minutes(1500), "1d 1h");
     }
 
     #[test]
@@ -243,19 +341,62 @@ mod tests {
 
     #[test]
     fn formats_remaining_status() {
-        let text = format_status(super::UsageStatus {
-            primary: Some(RateLimit {
-                used_percent: 18.0,
-                window_minutes: 300,
-            }),
-            secondary: Some(RateLimit {
-                used_percent: 6.0,
-                window_minutes: 10080,
-            }),
-        });
+        let text = format_status_at(
+            super::UsageStatus {
+                primary: Some(RateLimit {
+                    used_percent: 18.0,
+                    window_minutes: 300,
+                    resets_at: Some(unix(1772598059)),
+                }),
+                secondary: Some(RateLimit {
+                    used_percent: 6.0,
+                    window_minutes: 10080,
+                    resets_at: Some(unix(1773119113)),
+                }),
+            },
+            unix(1772592508),
+            UtcOffset::from_hms(13, 0, 0).expect("valid offset"),
+        );
         assert_eq!(
             text,
-            "Daily (Resets in 5h): 82%\nWeekly (Resets in 7d): 94%"
+            "`Daily:  82% remaining (Resets at 5:20 PM)`\n`Weekly: 94% remaining (Resets at 6:05 PM)`"
+        );
+    }
+
+    #[test]
+    fn reads_current_token_count_event_shape() {
+        let value = json!({
+            "timestamp": "2026-03-04T02:45:53.905Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {
+                        "used_percent": 71.0,
+                        "window_minutes": 300,
+                        "resets_at": 1772598059
+                    },
+                    "secondary": {
+                        "used_percent": 40.0,
+                        "window_minutes": 10080,
+                        "resets_at": 1773119113
+                    }
+                }
+            }
+        });
+        let json = value.to_string();
+        let event: super::SessionEvent<'_> =
+            serde_json::from_str(&json).expect("expected session event");
+
+        let status = session_rate_limits(&event).expect("expected rate-limit status");
+
+        assert_eq!(
+            format_status_at(
+                status.limits,
+                unix(1772592508),
+                UtcOffset::from_hms(13, 0, 0).expect("valid offset"),
+            ),
+            "`Daily:  29% remaining (Resets at 5:20 PM)`\n`Weekly: 60% remaining (Resets at 6:05 PM)`"
         );
     }
 }

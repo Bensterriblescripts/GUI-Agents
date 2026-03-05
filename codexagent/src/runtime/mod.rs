@@ -5,9 +5,19 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError,
+    HANDLE,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
+};
 use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CreateMutexW};
-use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+use windows_sys::Win32::UI::Shell::{
+    SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify, SetCurrentProcessExplicitAppUserModelID,
+};
 
 use crate::config::{
     APP_DISPLAY_NAME, APP_USER_MODEL_ID, CODEX_AGENTS_CONTENTS, CODEX_CONFIG_CONTENTS,
@@ -109,10 +119,21 @@ pub(crate) fn set_window_app_id(hwnd: *mut std::ffi::c_void) {
 const INSTALL_PATH: &str = r"C:\Local\Software\codexagent.exe";
 const LEGACY_SHORTCUT_NAMES: &[&str] = &[];
 const INSTANCE_MUTEX_NAME: &str = "Local\\CodexAgent.Instance";
+const LEGACY_CONTEXT_MENU_NAME: &str = "Launch Codex";
+const LEGACY_DIRECTORY_MENU_KEY: &str = r"Software\Classes\Directory\shell\Launch Codex";
+const LEGACY_BACKGROUND_MENU_KEY: &str =
+    r"Software\Classes\Directory\Background\shell\Launch Codex";
+const LEGACY_CONTEXT_MENU_KEYS: &[&str] = &[LEGACY_DIRECTORY_MENU_KEY, LEGACY_BACKGROUND_MENU_KEY];
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LaunchRequest {
     pub(crate) cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ContextMenuSelection {
+    Add,
+    Remove,
 }
 
 pub(crate) struct InstanceMutex(HANDLE);
@@ -153,20 +174,6 @@ fn clear_codex_state() {
         return;
     };
     let codex_dir = PathBuf::from(home).join(".codex");
-
-    let sessions_dir = codex_dir.join("sessions");
-    if sessions_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&sessions_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let _ = fs::remove_dir_all(&path);
-                } else {
-                    let _ = fs::remove_file(&path);
-                }
-            }
-        }
-    }
 
     for name in CODEX_STATE_FILES {
         let _ = fs::remove_file(codex_dir.join(name));
@@ -209,6 +216,74 @@ pub(crate) fn ensure_app_identity() {
     ensure_start_menu_shortcut();
 }
 
+pub(crate) fn current_context_menu_selection() -> io::Result<ContextMenuSelection> {
+    let directory_command = read_registry_string_in_known_roots(
+        &format!(r"{}\command", LEGACY_DIRECTORY_MENU_KEY),
+        None,
+    )?;
+    let background_command = read_registry_string_in_known_roots(
+        &format!(r"{}\command", LEGACY_BACKGROUND_MENU_KEY),
+        None,
+    )?;
+
+    if directory_command.as_deref() == Some(context_menu_command("%1").as_str())
+        && background_command.as_deref() == Some(context_menu_command("%V").as_str())
+    {
+        return Ok(ContextMenuSelection::Add);
+    }
+
+    Ok(ContextMenuSelection::Remove)
+}
+
+pub(crate) fn install_context_menu() -> io::Result<bool> {
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        LEGACY_DIRECTORY_MENU_KEY,
+        None,
+        LEGACY_CONTEXT_MENU_NAME,
+    )?;
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        LEGACY_DIRECTORY_MENU_KEY,
+        Some("Icon"),
+        &context_menu_icon(),
+    )?;
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        &format!(r"{}\command", LEGACY_DIRECTORY_MENU_KEY),
+        None,
+        &context_menu_command("%1"),
+    )?;
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        LEGACY_BACKGROUND_MENU_KEY,
+        None,
+        LEGACY_CONTEXT_MENU_NAME,
+    )?;
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        LEGACY_BACKGROUND_MENU_KEY,
+        Some("Icon"),
+        &context_menu_icon(),
+    )?;
+    write_registry_string(
+        HKEY_CURRENT_USER,
+        &format!(r"{}\command", LEGACY_BACKGROUND_MENU_KEY),
+        None,
+        &context_menu_command("%V"),
+    )?;
+    notify_shell_associations_changed();
+    Ok(true)
+}
+
+pub(crate) fn remove_context_menu() -> io::Result<bool> {
+    delete_registry_tree(HKEY_CURRENT_USER, LEGACY_DIRECTORY_MENU_KEY)?;
+    delete_registry_tree(HKEY_CURRENT_USER, LEGACY_BACKGROUND_MENU_KEY)?;
+    remove_machine_context_menu()?;
+    notify_shell_associations_changed();
+    Ok(false)
+}
+
 fn ensure_start_menu_shortcut() {
     let Some(appdata) = env::var_os("APPDATA") else {
         return;
@@ -248,15 +323,15 @@ fn ensure_start_menu_shortcut() {
             "Add-Type -TypeDefinition @\"\n",
             "using System;using System.Runtime.InteropServices;\n",
             "public static class SA{{\n",
-            "  [ComImport,Guid(\"\"886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99\"\"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n",
+            "  [ComImport,Guid(\"886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99\"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]\n",
             "  interface IPS{{void GC(out uint c);void GA(uint i,out Guid k);void GV(ref PK k,out PV v);void SV(ref PK k,ref PV v);void Co();}}\n",
             "  [StructLayout(LayoutKind.Sequential,Pack=4)]public struct PK{{public Guid f;public uint p;}}\n",
             "  [StructLayout(LayoutKind.Sequential)]public struct PV{{public ushort vt;ushort r1,r2,r3;public IntPtr d;IntPtr pad;}}\n",
-            "  [DllImport(\"\"shell32.dll\"\",CharSet=CharSet.Unicode,PreserveSig=false)]\n",
+            "  [DllImport(\"shell32.dll\",CharSet=CharSet.Unicode,PreserveSig=false)]\n",
             "  static extern void SHGetPropertyStoreFromParsingName(string p,IntPtr b,int f,[MarshalAs(UnmanagedType.LPStruct)]Guid r,[MarshalAs(UnmanagedType.Interface)]out IPS s);\n",
             "  public static void Set(string path,string appId){{\n",
-            "    IPS s;SHGetPropertyStoreFromParsingName(path,IntPtr.Zero,2,new Guid(\"\"886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99\"\"),out s);\n",
-            "    var k=new PK{{f=new Guid(\"\"9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3\"\"),p=5}};\n",
+            "    IPS s;SHGetPropertyStoreFromParsingName(path,IntPtr.Zero,2,new Guid(\"886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99\"),out s);\n",
+            "    var k=new PK{{f=new Guid(\"9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3\"),p=5}};\n",
             "    var v=new PV{{vt=31,d=Marshal.StringToCoTaskMemUni(appId)}};s.SV(ref k,ref v);s.Co();Marshal.FreeCoTaskMem(v.d);\n",
             "  }}\n",
             "}}\n",
@@ -283,6 +358,286 @@ fn ensure_start_menu_shortcut() {
             logging::error(format!("failed to run powershell for shortcut: {}", e));
         }
     }
+}
+
+fn read_registry_string_in_known_roots(
+    path: &str,
+    name: Option<&str>,
+) -> io::Result<Option<String>> {
+    if let Some(value) = read_registry_string(HKEY_CURRENT_USER, path, name)? {
+        return Ok(Some(value));
+    }
+    read_registry_string(HKEY_LOCAL_MACHINE, path, name)
+}
+
+fn registry_key_exists(root: *mut core::ffi::c_void, path: &str) -> io::Result<bool> {
+    let mut key = std::ptr::null_mut();
+    let path = to_wide(path);
+    let status = unsafe { RegOpenKeyExW(root, path.as_ptr(), 0, KEY_QUERY_VALUE, &mut key) };
+    if status == 0 {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(true);
+    }
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(false);
+    }
+    Err(io::Error::from_raw_os_error(status as i32))
+}
+
+fn read_registry_string(
+    root: *mut core::ffi::c_void,
+    path: &str,
+    name: Option<&str>,
+) -> io::Result<Option<String>> {
+    let mut key = std::ptr::null_mut();
+    let path = to_wide(path);
+    let status = unsafe { RegOpenKeyExW(root, path.as_ptr(), 0, KEY_QUERY_VALUE, &mut key) };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+
+    let name_wide = name.map(to_wide);
+    let value_name = name_wide
+        .as_ref()
+        .map_or(std::ptr::null(), |current| current.as_ptr());
+    let mut value_type = 0;
+    let mut byte_len = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name,
+            std::ptr::null_mut(),
+            &mut value_type,
+            std::ptr::null_mut(),
+            &mut byte_len,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(None);
+    }
+    if status != 0 {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if value_type != REG_SZ {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(None);
+    }
+    if byte_len == 0 {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(Some(String::new()));
+    }
+
+    let mut bytes = vec![0u8; byte_len as usize];
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name,
+            std::ptr::null_mut(),
+            &mut value_type,
+            bytes.as_mut_ptr(),
+            &mut byte_len,
+        )
+    };
+
+    unsafe {
+        RegCloseKey(key);
+    }
+
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    if value_type != REG_SZ {
+        return Ok(None);
+    }
+
+    let words = byte_len as usize / std::mem::size_of::<u16>();
+    let wide = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, words) };
+    let end = wide
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(wide.len());
+    Ok(Some(String::from_utf16_lossy(&wide[..end])))
+}
+
+fn remove_machine_context_menu() -> io::Result<()> {
+    let mut needs_elevation = false;
+
+    for path in LEGACY_CONTEXT_MENU_KEYS {
+        if !registry_key_exists(HKEY_LOCAL_MACHINE, path)? {
+            continue;
+        }
+        match delete_registry_tree(HKEY_LOCAL_MACHINE, path) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                needs_elevation = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if needs_elevation {
+        run_elevated_powershell(&legacy_context_menu_remove_script())?;
+    }
+
+    Ok(())
+}
+
+fn legacy_context_menu_remove_script() -> String {
+    let paths = LEGACY_CONTEXT_MENU_KEYS
+        .iter()
+        .map(|path| format!("  'HKLM:\\{}'", path))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!(
+        "@(\n{}\n) | ForEach-Object {{\n  Remove-Item -Path $_ -Recurse -Force -ErrorAction SilentlyContinue\n}}",
+        paths
+    )
+}
+
+fn run_elevated_powershell(script: &str) -> io::Result<()> {
+    let child_command = format!("& {{ {} }}", script);
+    let parent_command = format!(
+        "$process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',{}); if ($null -eq $process) {{ exit 1 }}; exit $process.ExitCode",
+        powershell_single_quote(&child_command)
+    );
+
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &parent_command,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .or_else(|| stdout.lines().find(|line| !line.trim().is_empty()))
+        .unwrap_or("elevated PowerShell command failed");
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        message.to_owned(),
+    ))
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn write_registry_string(
+    root: *mut core::ffi::c_void,
+    path: &str,
+    name: Option<&str>,
+    value: &str,
+) -> io::Result<()> {
+    let path = to_wide(path);
+    let mut key = std::ptr::null_mut();
+    let status = unsafe {
+        RegCreateKeyExW(
+            root,
+            path.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+
+    let value_wide = to_wide(value);
+    let name_wide = name.map(to_wide);
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            name_wide
+                .as_ref()
+                .map_or(std::ptr::null(), |name| name.as_ptr()),
+            0,
+            REG_SZ,
+            value_wide.as_ptr() as *const u8,
+            (value_wide.len() * std::mem::size_of::<u16>()) as u32,
+        )
+    };
+
+    unsafe {
+        RegCloseKey(key);
+    }
+
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+
+    Ok(())
+}
+
+fn delete_registry_tree(root: *mut core::ffi::c_void, path: &str) -> io::Result<()> {
+    let path = to_wide(path);
+    let status = unsafe { RegDeleteTreeW(root, path.as_ptr()) };
+    if status == 0 || status == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    Err(io::Error::from_raw_os_error(status as i32))
+}
+
+fn notify_shell_associations_changed() {
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED as i32,
+            SHCNF_IDLIST,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+    }
+}
+
+fn context_menu_command(token: &str) -> String {
+    format!(
+        "\"{}\" --show --cwd \"{}\"",
+        codex_exe_path().display(),
+        token
+    )
+}
+
+fn context_menu_icon() -> String {
+    let windir = env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_owned());
+    format!(r"{}\System32\imageres.dll,-109", windir)
+}
+
+fn codex_exe_path() -> PathBuf {
+    env::current_exe().unwrap_or_else(|_| PathBuf::from(INSTALL_PATH))
 }
 
 pub(crate) fn ensure_codex_files() -> io::Result<()> {
@@ -359,6 +714,10 @@ pub(crate) fn current_model() -> String {
         })
         .and_then(|contents| parse_model(&contents))
         .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
+
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub(crate) fn set_model(model: &str) -> io::Result<String> {

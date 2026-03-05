@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use eframe::egui::{
     self, Color32, CursorIcon, FontId, Key, KeyboardShortcut, Modifiers, RichText, TextEdit,
 };
@@ -9,19 +11,51 @@ use crate::config::{
 use crate::notify;
 
 use super::position::startup_outer_position;
-use super::render::markdown_layout_job;
+use super::render::{OutputLineKind, markdown_layout_job};
 use super::{
-    CodexAgentApp, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS, WindowRestoreState,
+    CodexAgentApp, ContextMenuState, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS,
+    SetupState, WindowRestoreState,
 };
 
 const TITLEBAR_BUTTON_SIZE: f32 = 24.0;
 const TITLEBAR_BUTTON_SPACING: f32 = 2.0;
 const CANCEL_BUSY_BUTTON_WIDTH: f32 = CANCEL_BUTTON_WIDTH * 0.8;
+const SETTINGS_MENU_WIDTH: f32 = 360.0 * 0.4 * 1.2;
+const SETTINGS_SUBMENU_WIDTH: f32 = SETTINGS_MENU_WIDTH * 1.2 * 1.3 * 1.3;
+const SETTINGS_SUBMENU_PICKER_WIDTH: f32 = SETTINGS_SUBMENU_WIDTH;
+const SETTINGS_SUBMENU_SPACING: f32 = 34.0;
+const SETTINGS_SUBMENU_OFFSET_X: f32 = 10.0;
+const SETTINGS_ROW_HEIGHT: f32 = 28.0;
+const SETTINGS_ROW_RADIUS: u8 = 8;
+const SETTINGS_ROW_PADDING_X: f32 = 8.0;
+const SETTINGS_ROW_PADDING_Y: f32 = 5.0;
+const SETTINGS_ACTIVE_BADGE_WIDTH: f32 = 44.0;
+const SETTINGS_ACTIVE_BADGE_GAP: f32 = 10.0;
 
 struct GlowPalette {
     stroke: Color32,
     shadow: Color32,
     separator: Color32,
+}
+
+fn cached_markdown_layouter<'a>(
+    galley: Option<Arc<egui::Galley>>,
+    galley_width: Option<f32>,
+    prompt_ranges: &'a [(usize, usize)],
+    response_start: usize,
+    line_kinds: &'a [(usize, OutputLineKind)],
+) -> impl FnMut(&egui::Ui, &str, f32) -> Arc<egui::Galley> + 'a {
+    let mut galley = galley;
+    let mut galley_width = galley_width;
+    move |ui: &egui::Ui, text: &str, wrap_width: f32| {
+        if galley.is_none() || !CodexAgentApp::same_width(galley_width, wrap_width) {
+            let job =
+                markdown_layout_job(text, wrap_width, prompt_ranges, response_start, line_kinds);
+            galley = Some(ui.fonts(|fonts| fonts.layout_job(job)));
+            galley_width = Some(wrap_width);
+        }
+        galley.clone().unwrap()
+    }
 }
 
 fn show_picker_row(
@@ -31,8 +65,10 @@ fn show_picker_row(
     selected: bool,
     active: bool,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), SETTINGS_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
     let fill = if selected {
         Color32::from_rgba_unmultiplied(124, 189, 255, 28)
     } else if response.hovered() {
@@ -40,19 +76,32 @@ fn show_picker_row(
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(SETTINGS_ROW_RADIUS), fill);
     if active {
         ui.painter().rect_stroke(
             rect,
-            8.0,
+            egui::CornerRadius::same(SETTINGS_ROW_RADIUS),
             egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(124, 189, 255, 80)),
             egui::StrokeKind::Outside,
         );
     }
-    let content_rect = rect.shrink2(egui::vec2(8.0, 5.0));
+    let content_rect = rect.shrink2(egui::vec2(SETTINGS_ROW_PADDING_X, SETTINGS_ROW_PADDING_Y));
+    let badge_width = if active {
+        SETTINGS_ACTIVE_BADGE_WIDTH + SETTINGS_ACTIVE_BADGE_GAP
+    } else {
+        0.0
+    };
+    let text_rect = egui::Rect::from_min_max(
+        content_rect.min,
+        egui::pos2(
+            (content_rect.max.x - badge_width).max(content_rect.min.x),
+            content_rect.max.y,
+        ),
+    );
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(content_rect)
+            .max_rect(text_rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
             ui.add(
@@ -71,24 +120,37 @@ fn show_picker_row(
                 } else {
                     Color32::from_rgba_unmultiplied(214, 224, 238, 150)
                 }))
+                .truncate()
                 .selectable(false)
                 .sense(egui::Sense::empty()),
             );
-            if active {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new("IN USE")
-                                .size(11.0)
-                                .color(Color32::from_rgb(160, 214, 255)),
-                        )
-                        .selectable(false)
-                        .sense(egui::Sense::empty()),
-                    );
-                });
-            }
         },
     );
+    if active {
+        let badge_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                content_rect.max.x - SETTINGS_ACTIVE_BADGE_WIDTH,
+                content_rect.min.y,
+            ),
+            content_rect.max,
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(badge_rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("IN USE")
+                            .size(11.0)
+                            .color(Color32::from_rgb(160, 214, 255)),
+                    )
+                    .selectable(false)
+                    .sense(egui::Sense::empty()),
+                );
+            },
+        );
+    }
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -108,7 +170,185 @@ fn show_picker(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
+fn style_settings_menu_rows(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    style.interaction.selectable_labels = false;
+    style.spacing.button_padding = egui::vec2(SETTINGS_ROW_PADDING_X, SETTINGS_ROW_PADDING_Y);
+    style.spacing.interact_size.y = SETTINGS_ROW_HEIGHT;
+    style.visuals.button_frame = true;
+
+    let inactive = &mut style.visuals.widgets.inactive;
+    inactive.weak_bg_fill = Color32::TRANSPARENT;
+    inactive.bg_stroke = egui::Stroke::NONE;
+    inactive.corner_radius = egui::CornerRadius::same(SETTINGS_ROW_RADIUS);
+    inactive.fg_stroke.color = Color32::from_rgb(124, 189, 255);
+
+    let hovered = &mut style.visuals.widgets.hovered;
+    hovered.weak_bg_fill = Color32::from_rgba_unmultiplied(255, 255, 255, 12);
+    hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(124, 189, 255, 48));
+    hovered.corner_radius = egui::CornerRadius::same(SETTINGS_ROW_RADIUS);
+    hovered.fg_stroke.color = Color32::from_rgb(160, 214, 255);
+
+    let open = &mut style.visuals.widgets.open;
+    open.weak_bg_fill = Color32::from_rgba_unmultiplied(124, 189, 255, 28);
+    open.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(124, 189, 255, 80));
+    open.corner_radius = egui::CornerRadius::same(SETTINGS_ROW_RADIUS);
+    open.fg_stroke.color = Color32::from_rgb(160, 214, 255);
+}
+
+fn show_settings_submenu<R>(
+    ui: &mut egui::Ui,
+    id_source: &'static str,
+    label: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let popup_id = ui.make_persistent_id(id_source);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        egui::Sense::click(),
+    );
+    let mut is_open = ui.memory(|mem| mem.is_popup_open(popup_id));
+    let visuals = if is_open {
+        ui.style().visuals.widgets.open
+    } else if response.hovered() {
+        ui.style().visuals.widgets.hovered
+    } else {
+        ui.style().visuals.widgets.inactive
+    };
+    ui.painter().rect(
+        rect,
+        visuals.corner_radius,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Outside,
+    );
+    let content_rect = rect.shrink2(ui.spacing().button_padding);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(content_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(label)
+                        .monospace()
+                        .color(visuals.fg_stroke.color),
+                )
+                .selectable(false)
+                .sense(egui::Sense::empty()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(">")
+                            .monospace()
+                            .color(visuals.fg_stroke.color),
+                    )
+                    .selectable(false)
+                    .sense(egui::Sense::empty()),
+                );
+            });
+        },
+    );
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+
+    if response.hovered() && !is_open {
+        ui.memory_mut(|mem| mem.open_popup(popup_id));
+        ui.ctx().request_repaint();
+        is_open = true;
+    }
+
+    let mut popup = None;
+    let mut popup_rect = None;
+    let mut button_rect = response.rect;
+
+    if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
+        button_rect = to_global * button_rect;
+    }
+
+    if is_open {
+        let frame = egui::Frame::menu(ui.style());
+        let pos = egui::pos2(
+            button_rect.right() + SETTINGS_SUBMENU_SPACING + SETTINGS_SUBMENU_OFFSET_X,
+            button_rect.top() - frame.total_margin().top,
+        );
+        let area = egui::Area::new(popup_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .default_width(SETTINGS_SUBMENU_WIDTH)
+            .sense(egui::Sense::hover());
+        let area_response = area.show(ui.ctx(), |ui| {
+            ui.set_width(SETTINGS_SUBMENU_WIDTH);
+            frame
+                .show(ui, |ui| {
+                    style_settings_menu_rows(ui);
+                    add_contents(ui)
+                })
+                .inner
+        });
+        popup_rect = Some(area_response.response.rect);
+        popup = Some(area_response.inner);
+    }
+
+    if is_open {
+        let mut keep_open = response.hovered();
+        if let Some(rect) = popup_rect {
+            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) {
+                keep_open |= rect.contains(pointer);
+                let bridge = egui::Rect::from_min_max(
+                    egui::pos2(button_rect.right(), button_rect.top()),
+                    egui::pos2(rect.left(), button_rect.bottom().max(rect.bottom())),
+                )
+                .expand(6.0);
+                keep_open |= bridge.contains(pointer);
+            }
+        }
+        if !keep_open {
+            ui.memory_mut(|mem| {
+                if mem.is_popup_open(popup_id) {
+                    mem.close_popup();
+                }
+            });
+        }
+    }
+
+    popup
+}
+
+fn close_settings_submenu(ui: &mut egui::Ui, id_source: &'static str) {
+    let popup_id = ui.make_persistent_id(id_source);
+    ui.memory_mut(|mem| {
+        if mem.is_popup_open(popup_id) {
+            mem.close_popup();
+        }
+    });
+    ui.close_menu();
+}
+
 impl CodexAgentApp {
+    fn show_status_button(&mut self, ui: &mut egui::Ui) {
+        let enabled = !self.busy && !self.locked;
+        let response = ui.add_enabled(
+            enabled,
+            egui::Button::new(
+                RichText::new("Usage").color(Color32::from_rgba_unmultiplied(214, 224, 238, 170)),
+            )
+            .fill(Color32::TRANSPARENT)
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(egui::CornerRadius::same(255)),
+        );
+        if enabled && response.hovered() {
+            ui.painter().rect_filled(
+                response.rect.expand2(egui::vec2(1.4336, 2.304)),
+                egui::CornerRadius::same(255),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 15),
+            );
+        }
+        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            self.show_status();
+        }
+    }
+
     fn glow_palette(&self) -> GlowPalette {
         if self.busy {
             return GlowPalette {
@@ -167,18 +407,23 @@ impl CodexAgentApp {
         .fill(Color32::TRANSPARENT)
         .stroke(egui::Stroke::NONE)
         .corner_radius(egui::CornerRadius::same(255));
-        let response = egui::menu::menu_custom_button(ui, button, |ui| {
-            self.refresh_current_model();
-            self.refresh_notifications_enabled();
-            ui.set_min_width(360.0);
+        let menu = egui::menu::menu_custom_button(ui, button, |ui| {
+            if !self.settings_menu_open {
+                self.refresh_current_model();
+                self.refresh_notifications_enabled();
+                self.refresh_context_menu_state_async();
+                self.settings_menu_open = true;
+            }
+            ui.set_width(SETTINGS_MENU_WIDTH);
             ui.scope(|ui| {
-                ui.style_mut().interaction.selectable_labels = false;
-                ui.menu_button(
-                    RichText::new("Model").color(Color32::from_rgb(214, 224, 238)),
-                    |ui| {
-                        ui.set_min_width(360.0);
+                style_settings_menu_rows(ui);
+                ui.spacing_mut().menu_spacing = SETTINGS_SUBMENU_SPACING;
+                let close_model_menu =
+                    show_settings_submenu(ui, "settings_model_submenu", "Model", |ui| {
+                        ui.set_width(SETTINGS_SUBMENU_WIDTH);
+                        let mut close_parent = false;
                         show_picker(ui, |ui| {
-                            ui.set_min_width(340.0);
+                            ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
                             for option in MODEL_OPTIONS.iter() {
                                 let active = option.name == self.current_model;
                                 if show_picker_row(
@@ -193,18 +438,25 @@ impl CodexAgentApp {
                                     if !active {
                                         self.select_model(option.name);
                                     }
-                                    ui.close_menu();
+                                    close_parent = true;
                                 }
                             }
                         });
-                    },
-                );
-                ui.menu_button(
-                    RichText::new("Notification").color(Color32::from_rgb(214, 224, 238)),
+                        close_parent
+                    })
+                    .unwrap_or(false);
+                if close_model_menu {
+                    close_settings_submenu(ui, "settings_model_submenu");
+                }
+                let close_notification_menu = show_settings_submenu(
+                    ui,
+                    "settings_notification_submenu",
+                    "Notification",
                     |ui| {
-                        ui.set_min_width(360.0);
+                        ui.set_width(SETTINGS_SUBMENU_WIDTH);
+                        let mut close_parent = false;
                         show_picker(ui, |ui| {
-                            ui.set_min_width(340.0);
+                            ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
                             for option in NOTIFICATION_OPTIONS.iter() {
                                 let active = option.enabled == self.notifications_enabled;
                                 if show_picker_row(
@@ -219,15 +471,85 @@ impl CodexAgentApp {
                                     if !active {
                                         self.select_notification(option.enabled);
                                     }
-                                    ui.close_menu();
+                                    close_parent = true;
                                 }
                             }
                         });
+                        close_parent
                     },
-                );
+                )
+                .unwrap_or(false);
+                if close_notification_menu {
+                    close_settings_submenu(ui, "settings_notification_submenu");
+                }
+                let close_context_menu = show_settings_submenu(
+                    ui,
+                    "settings_context_submenu",
+                    "Right Click Option",
+                    |ui| {
+                        let add_description = match self.context_menu_state {
+                            ContextMenuState::Checking => "Checking current registry values...",
+                            ContextMenuState::Add => {
+                                "Current: folder and background right-click entries are active"
+                            }
+                            _ => "Add Explorer folder and background entries",
+                        };
+                        let remove_description = match self.context_menu_state {
+                            ContextMenuState::Checking => "Checking current registry values...",
+                            ContextMenuState::Remove => {
+                                "Current: right-click entries are not installed"
+                            }
+                            ContextMenuState::Error => "Unable to read current registry values",
+                            ContextMenuState::Add => {
+                                "Remove Explorer folder and background entries"
+                            }
+                        };
+                        ui.set_width(SETTINGS_SUBMENU_WIDTH);
+                        let mut close_parent = false;
+                        show_picker(ui, |ui| {
+                            ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
+                            if show_picker_row(
+                                ui,
+                                "Add",
+                                add_description,
+                                false,
+                                self.context_menu_state == ContextMenuState::Add,
+                            )
+                            .clicked()
+                            {
+                                if self.context_menu_state != ContextMenuState::Add {
+                                    self.select_context_menu(true);
+                                }
+                                close_parent = true;
+                            }
+                            if show_picker_row(
+                                ui,
+                                "Remove",
+                                remove_description,
+                                false,
+                                self.context_menu_state == ContextMenuState::Remove,
+                            )
+                            .clicked()
+                            {
+                                if self.context_menu_state != ContextMenuState::Remove {
+                                    self.select_context_menu(false);
+                                }
+                                close_parent = true;
+                            }
+                        });
+                        close_parent
+                    },
+                )
+                .unwrap_or(false);
+                if close_context_menu {
+                    close_settings_submenu(ui, "settings_context_submenu");
+                }
             });
-        })
-        .response;
+        });
+        let response = menu.response;
+        if menu.inner.is_none() {
+            self.settings_menu_open = false;
+        }
         if response.hovered() {
             ui.painter().rect_filled(
                 response.rect.expand2(egui::vec2(1.4336, 2.304)),
@@ -340,6 +662,7 @@ impl eframe::App for CodexAgentApp {
                                 .selectable(false),
                             );
                             ui.add_space(10.0);
+                            self.show_status_button(ui);
                             self.show_settings_menu(ui);
                             let titlebar_w =
                                 TITLEBAR_BUTTON_SIZE * 3.0 + TITLEBAR_BUTTON_SPACING * 2.0;
@@ -598,60 +921,34 @@ impl eframe::App for CodexAgentApp {
                                         Some(FontId::proportional(TEXT_FONT_SIZE));
                                     let wrap_width = ui.available_width();
                                     self.sync_output_galley(wrap_width);
-                                    let output_content_h = self
-                                        .output_galley
-                                        .as_ref()
-                                        .map(|galley| galley.size().y.max(LINE_HEIGHT))
-                                        .unwrap_or(output_h);
                                     let prompt_ranges = &self.output_display_prompt_ranges;
                                     let output_base = self.output_display_response_start;
                                     let line_kinds = &self.output_display_line_kinds;
                                     let output_galley = self.output_galley.clone();
                                     let output_galley_width = self.output_galley_width;
                                     let output_display_buffer = &mut self.output_display_buffer;
-                                    let mut layouter =
-                                        |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                                            if Self::same_width(output_galley_width, wrap_width) {
-                                                if let Some(galley) = output_galley.clone() {
-                                                    galley
-                                                } else {
-                                                    let job = markdown_layout_job(
-                                                        text,
-                                                        wrap_width,
-                                                        prompt_ranges,
-                                                        output_base,
-                                                        line_kinds,
-                                                    );
-                                                    ui.fonts(|fonts| fonts.layout_job(job))
-                                                }
-                                            } else {
-                                                let job = markdown_layout_job(
-                                                    text,
-                                                    wrap_width,
-                                                    prompt_ranges,
-                                                    output_base,
-                                                    line_kinds,
-                                                );
-                                                ui.fonts(|fonts| fonts.layout_job(job))
-                                            }
-                                        };
-                                    let output_response = ui.add_sized(
-                                        egui::vec2(ui.available_width(), output_content_h),
-                                        TextEdit::multiline(output_display_buffer)
-                                            .id_source("output-display")
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(1)
-                                            .layouter(&mut layouter)
-                                            .frame(false),
+                                    let mut layouter = cached_markdown_layouter(
+                                        output_galley.clone(),
+                                        output_galley_width,
+                                        prompt_ranges,
+                                        output_base,
+                                        line_kinds,
                                     );
+                                    let output_edit = TextEdit::multiline(output_display_buffer)
+                                        .id_source("output-display")
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(1)
+                                        .layouter(&mut layouter)
+                                        .frame(false)
+                                        .show(ui);
                                     if output_galley.is_some() {
                                         if let Some(y) = self.output_separator_y {
                                             let sep_rect = egui::Rect::from_min_size(
                                                 egui::pos2(
-                                                    output_response.rect.left(),
-                                                    output_response.rect.top() + y,
+                                                    output_edit.response.rect.left(),
+                                                    output_edit.galley_pos.y + y,
                                                 ),
-                                                egui::vec2(output_response.rect.width(), 1.0),
+                                                egui::vec2(output_edit.response.rect.width(), 1.0),
                                             );
                                             ui.painter().rect_filled(sep_rect, 0.0, glow.separator);
                                         }
@@ -664,6 +961,35 @@ impl eframe::App for CodexAgentApp {
                                 egui::Sense::hover(),
                             );
                             ui.painter().rect_filled(sep_rect, 0.0, glow.separator);
+                            ui.add_space(4.0);
+                        }
+                        if matches!(self.setup_state, SetupState::InstallFailed(_)) {
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let resp = ui.add(
+                                    egui::Button::new(
+                                        RichText::new("Retry Install")
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(Color32::from_rgba_unmultiplied(124, 189, 255, 30))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        Color32::from_rgba_unmultiplied(124, 189, 255, 60),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(255)),
+                                );
+                                if resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        resp.rect.expand2(egui::vec2(1.4336, 2.304)),
+                                        egui::CornerRadius::same(255),
+                                        Color32::from_rgba_unmultiplied(124, 189, 255, 20),
+                                    );
+                                }
+                                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                    self.start_codex_install();
+                                }
+                            });
                             ui.add_space(4.0);
                         }
                         let response = ui
@@ -680,38 +1006,24 @@ impl eframe::App for CodexAgentApp {
                                         self.sync_input_galley(wrap_width);
                                         let input_galley = self.input_galley.clone();
                                         let input_galley_width = self.input_galley_width;
-                                        let mut layouter =
-                                            |ui: &egui::Ui, text: &str, wrap_width: f32| {
-                                                if Self::same_width(input_galley_width, wrap_width)
-                                                {
-                                                    if let Some(galley) = input_galley.clone() {
-                                                        galley
-                                                    } else {
-                                                        let job = markdown_layout_job(
-                                                            text,
-                                                            wrap_width,
-                                                            &[],
-                                                            0,
-                                                            &[],
-                                                        );
-                                                        ui.fonts(|fonts| fonts.layout_job(job))
-                                                    }
-                                                } else {
-                                                    let job = markdown_layout_job(
-                                                        text,
-                                                        wrap_width,
-                                                        &[],
-                                                        0,
-                                                        &[],
-                                                    );
-                                                    ui.fonts(|fonts| fonts.layout_job(job))
-                                                }
-                                            };
+                                        let mut layouter = cached_markdown_layouter(
+                                            input_galley,
+                                            input_galley_width,
+                                            &[],
+                                            0,
+                                            &[],
+                                        );
                                         TextEdit::multiline(&mut self.input)
                                             .id_source(Self::INPUT_ID)
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(input_rows)
-                                            .interactive(!self.locked)
+                                            .interactive(
+                                                !self.locked
+                                                    || matches!(
+                                                        self.setup_state,
+                                                        SetupState::Installing
+                                                    ),
+                                            )
                                             .return_key(KeyboardShortcut::new(
                                                 Modifiers::SHIFT,
                                                 Key::Enter,
@@ -770,7 +1082,9 @@ impl eframe::App for CodexAgentApp {
                                 input.key_pressed(Key::Enter) && !input.modifiers.shift
                             });
 
-                        if submit && !self.busy && !self.locked {
+                        if submit && matches!(self.setup_state, SetupState::Installing) {
+                            self.send_install_input();
+                        } else if submit && !self.busy && !self.locked {
                             self.submit();
                         }
                     });
