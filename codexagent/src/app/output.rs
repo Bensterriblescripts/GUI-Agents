@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use eframe::egui::{self, Vec2};
 
-use crate::config::{APP_NAME, CANCELLED_TEXT, PENDING_ANIMATION_INTERVAL, save_prompt_history_prompts};
+use crate::config::{
+    APP_NAME, CANCELLED_TEXT, PENDING_ANIMATION_INTERVAL, save_prompt_history_prompts,
+};
 use crate::logging;
 
 use super::render::{append_output_display, pending_dots, prepare_output_display};
@@ -14,6 +16,35 @@ const MAX_IDLE_RENDER_CAPACITY: usize = 16 * 1024;
 const LAYOUT_EPSILON: f32 = 0.1;
 
 impl CodexAgentApp {
+    pub(super) fn clear_output_buffers(&mut self) {
+        self.output.clear();
+        self.output_base = 0;
+        self.prompt_ranges.clear();
+        self.output_display_buffer.clear();
+        self.output_display_prompt_ranges.clear();
+        self.output_display_line_kinds.clear();
+        self.output_display_response_start = 0;
+        self.output_display_response_chars = 0;
+        self.output_display_base_len = 0;
+        self.output_display_source_len = 0;
+        self.output_display_can_append = false;
+        self.output_display_dirty = true;
+        self.output_display_busy = false;
+        self.output_galley = None;
+        self.output_galley_width = None;
+        self.output_separator_y = None;
+        self.reset_stream_progress();
+    }
+
+    pub(super) fn mark_output_for_rebuild(&mut self) {
+        self.output_display_can_append = false;
+    }
+
+    pub(super) fn refresh_after_output_rewrite(&mut self) {
+        self.mark_output_for_rebuild();
+        self.refresh_after_output_change();
+    }
+
     pub(super) fn invalidate_text_layout(&mut self) {
         self.text_layout_dirty = true;
         self.output_galley = None;
@@ -46,16 +77,7 @@ impl CodexAgentApp {
     pub(super) fn clear_session(&mut self) {
         self.input.clear();
         self.reset_prompt_history_navigation();
-        self.output.clear();
-        self.output_base = 0;
-        self.prompt_ranges.clear();
-        self.output_display_prompt_ranges.clear();
-        self.output_display_line_kinds.clear();
-        self.output_display_response_start = 0;
-        self.output_display_response_chars = 0;
-        self.output_display_base_len = 0;
-        self.output_display_source_len = 0;
-        self.output_display_can_append = false;
+        self.clear_output_buffers();
         self.session_id = None;
         self.cancelled_resume_context = None;
         self.active_prompt_id = None;
@@ -65,13 +87,13 @@ impl CodexAgentApp {
         self.title_set = false;
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::Title(APP_NAME.to_owned()));
-        self.stream_notification_pending.store(false, Ordering::Relaxed);
+        self.stream_notification_pending
+            .store(false, Ordering::Relaxed);
         self.clear_render_buffer();
         {
             let mut stream = self.shared_stream.lock().unwrap_or_else(|e| e.into_inner());
             stream.reset();
         }
-        self.reset_stream_progress();
         self.persist_history();
         self.refresh_after_text_change();
     }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -5,6 +6,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Deserialize;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError,
     HANDLE,
@@ -785,6 +787,98 @@ fn parse_model(contents: &str) -> Option<String> {
         }
         Some(value[1..value.len() - 1].to_owned())
     })
+}
+
+pub(crate) fn available_models(current_model: &str) -> Vec<String> {
+    let mut models = models_from_cache().unwrap_or_else(fallback_models);
+    if !current_model.is_empty() && !models.iter().any(|model| model == current_model) {
+        models.insert(0, current_model.to_owned());
+    }
+    models
+}
+
+#[derive(Deserialize)]
+struct ModelsCacheEntry {
+    slug: String,
+    visibility: Option<String>,
+    priority: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ModelsCacheFile {
+    models: Vec<ModelsCacheEntry>,
+}
+
+fn models_from_cache() -> Option<Vec<String>> {
+    let path = models_cache_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            logging::error(format!(
+                "failed to read models cache {}: {}",
+                path.display(),
+                error
+            ));
+            return None;
+        }
+    };
+    let mut payload: ModelsCacheFile = match serde_json::from_str(&contents) {
+        Ok(payload) => payload,
+        Err(error) => {
+            logging::error(format!(
+                "failed to parse models cache {}: {}",
+                path.display(),
+                error
+            ));
+            return None;
+        }
+    };
+    payload.models.sort_by(|left, right| {
+        left.priority
+            .unwrap_or(i64::MAX)
+            .cmp(&right.priority.unwrap_or(i64::MAX))
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+
+    let mut seen = HashSet::new();
+    let mut models = Vec::with_capacity(payload.models.len());
+    for entry in payload.models {
+        if entry.visibility.as_deref() == Some("hide") {
+            continue;
+        }
+        let slug = entry.slug.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        if seen.insert(slug.to_owned()) {
+            models.push(slug.to_owned());
+        }
+    }
+
+    if models.is_empty() {
+        return None;
+    }
+
+    Some(models)
+}
+
+fn models_cache_path() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|path| path.join(".codex").join("models_cache.json"))
+}
+
+fn fallback_models() -> Vec<String> {
+    [
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5-codex",
+        "gpt-5",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn replace_model(contents: &str, model: &str) -> String {

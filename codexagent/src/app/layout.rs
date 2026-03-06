@@ -34,16 +34,15 @@ impl CodexAgentApp {
         let (raw_output, raw_output_h) = if self.output_display_buffer.is_empty() {
             (0, 0.0)
         } else if let Some(galley) = self.output_galley.as_ref() {
-            (galley.rows.len().max(1), galley.size().y.max(LINE_HEIGHT))
+            let rows = galley.rows.len().max(1);
+            (rows, rows as f32 * LINE_HEIGHT)
         } else {
             logging::error("output galley missing during layout sync");
             (0, 0.0)
         };
         let (raw_input, raw_input_h) = if let Some(input_galley) = self.input_galley.as_ref() {
-            (
-                input_galley.rows.len().max(1),
-                input_galley.size().y.max(LINE_HEIGHT),
-            )
+            let rows = input_galley.rows.len().max(1);
+            (rows, rows as f32 * LINE_HEIGHT)
         } else {
             logging::error("input galley missing during layout sync");
             (1, LINE_HEIGHT)
@@ -140,8 +139,7 @@ impl CodexAgentApp {
             return;
         }
         self.last_inner_size = Some(size);
-        self.ctx
-            .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        self.apply_auto_resize(size);
     }
 
     pub(super) fn release_input_focus(&self) {

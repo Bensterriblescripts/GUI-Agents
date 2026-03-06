@@ -49,25 +49,6 @@ pub(super) const SLASH_COMMANDS: [SlashCommand; 1] = [SlashCommand {
     description: "Show local rate-limit status",
 }];
 
-pub(super) struct ModelOption {
-    pub(super) name: &'static str,
-}
-
-pub(super) const MODEL_OPTIONS: [ModelOption; 4] = [
-    ModelOption {
-        name: "gpt-5.3-codex",
-    },
-    ModelOption {
-        name: "gpt-5.2-codex",
-    },
-    ModelOption {
-        name: "gpt-5-codex",
-    },
-    ModelOption {
-        name: "gpt-5",
-    },
-];
-
 pub(super) struct NotificationOption {
     pub(super) name: &'static str,
     pub(super) enabled: bool,
@@ -118,6 +99,7 @@ pub(crate) struct CodexAgentApp {
     prompt_history_draft: Option<String>,
     output: String,
     current_model: String,
+    model_options: Vec<String>,
     notifications_enabled: bool,
     context_menu_state: ContextMenuState,
     context_menu_refresh_pending: bool,

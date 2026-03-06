@@ -8,7 +8,7 @@ use crate::logging;
 
 use super::{CodexAgentApp, MonitorKey, TileCell, TiledWindowState, WindowRestoreState};
 
-const BOTTOM_RESIZE_OFFSET: f32 = 20.0;
+const BOTTOM_RESIZE_OFFSET: f32 = 0.0;
 const TILE_GRID_DIMENSION: i32 = 4;
 const TILE_SNAP_TOLERANCE: i32 = 56;
 const TILE_RELEASE_TOLERANCE: i32 = 84;
@@ -404,6 +404,36 @@ impl CodexAgentApp {
             outer_size,
             user_height_override: self.user_height_override,
         }
+    }
+
+    pub(super) fn apply_auto_resize(&self, size: Vec2) {
+        #[cfg(target_os = "windows")]
+        {
+            let (outer_rect, inner_rect) = self.ctx.input(|input| {
+                let viewport = input.viewport();
+                (viewport.outer_rect, viewport.inner_rect)
+            });
+            if let (Some(outer_rect), Some(work_area)) = (outer_rect, self.monitor_work_area()) {
+                let current_inner_height = inner_rect
+                    .map(|rect| rect.height())
+                    .unwrap_or_else(|| self.ctx.screen_rect().height());
+                let outer_extra_height = (outer_rect.height() - current_inner_height).max(0.0);
+                let desired_outer_height = size.y + outer_extra_height;
+                let min_top = work_area.top as f32;
+                let max_top = (work_area.bottom as f32 - desired_outer_height).max(min_top);
+                let next_top = outer_rect.min.y.clamp(min_top, max_top);
+                if (next_top - outer_rect.min.y).abs() > 0.5 {
+                    self.ctx
+                        .send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                            outer_rect.min.x,
+                            next_top,
+                        )));
+                }
+            }
+        }
+
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
     }
 
     #[cfg(target_os = "windows")]

@@ -12,10 +12,7 @@ use crate::notify;
 
 use super::position::startup_outer_position;
 use super::render::{OutputLineKind, markdown_layout_job};
-use super::{
-    CodexAgentApp, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS, SetupState,
-    WindowRestoreState,
-};
+use super::{CodexAgentApp, NOTIFICATION_OPTIONS, SLASH_COMMANDS, SetupState, WindowRestoreState};
 
 const TITLEBAR_BUTTON_SIZE: f32 = 24.0;
 const TITLEBAR_BUTTON_SPACING: f32 = 2.0;
@@ -30,8 +27,6 @@ const SETTINGS_ROW_PADDING_X: f32 = 8.0;
 const SETTINGS_ROW_PADDING_Y: f32 = 5.0;
 const SETTINGS_ACTIVE_BADGE_WIDTH: f32 = 44.0;
 const SETTINGS_ACTIVE_BADGE_GAP: f32 = 10.0;
-const SETTINGS_OPTION_MESSAGE: &str = "\\n\\nThe Message\\n\\n";
-
 struct GlowPalette {
     stroke: Color32,
     shadow: Color32,
@@ -113,28 +108,19 @@ fn show_picker_row(
                 .selectable(false)
                 .sense(egui::Sense::empty()),
             );
-            ui.add_space(10.0);
-            let description_label = if description == SETTINGS_OPTION_MESSAGE {
-                egui::Label::new(
-                    RichText::new(description)
-                        .italics()
-                        .color(Color32::from_rgba_unmultiplied(148, 148, 148, 210)),
-                )
-                .selectable(false)
-                .sense(egui::Sense::empty())
-            } else {
-                egui::Label::new(RichText::new(description).color(if active {
-                    Color32::from_rgba_unmultiplied(214, 224, 238, 190)
-                } else {
-                    Color32::from_rgba_unmultiplied(214, 224, 238, 150)
-                }))
-                .truncate()
-                .selectable(false)
-                .sense(egui::Sense::empty())
-            };
-            ui.add(
-                description_label,
-            );
+            if !description.is_empty() {
+                ui.add_space(10.0);
+                ui.add(
+                    egui::Label::new(RichText::new(description).color(if active {
+                        Color32::from_rgba_unmultiplied(214, 224, 238, 190)
+                    } else {
+                        Color32::from_rgba_unmultiplied(214, 224, 238, 150)
+                    }))
+                    .truncate()
+                    .selectable(false)
+                    .sense(egui::Sense::empty()),
+                );
+            }
         },
     );
     if active {
@@ -292,6 +278,7 @@ impl CodexAgentApp {
         let menu = egui::menu::menu_custom_button(ui, button, |ui| {
             if !self.settings_menu_open {
                 self.refresh_current_model();
+                self.refresh_model_options();
                 self.refresh_notifications_enabled();
                 self.refresh_context_menu_state_async();
                 self.settings_menu_open = true;
@@ -304,26 +291,22 @@ impl CodexAgentApp {
                     .menu_button(RichText::new("Model").monospace(), |ui| {
                         ui.set_width(SETTINGS_SUBMENU_WIDTH);
                         let mut close_parent = false;
+                        let mut selected_model: Option<String> = None;
                         show_picker(ui, |ui| {
                             ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
-                            for option in MODEL_OPTIONS.iter() {
-                                let active = option.name == self.current_model;
-                                if show_picker_row(
-                                    ui,
-                                    option.name,
-                                    SETTINGS_OPTION_MESSAGE,
-                                    false,
-                                    active,
-                                )
-                                .clicked()
-                                {
+                            for option in self.model_options.iter() {
+                                let active = option == &self.current_model;
+                                if show_picker_row(ui, option, "", false, active).clicked() {
                                     if !active {
-                                        self.select_model(option.name);
+                                        selected_model = Some(option.clone());
                                     }
                                     close_parent = true;
                                 }
                             }
                         });
+                        if let Some(model) = selected_model {
+                            self.select_model(&model);
+                        }
                         close_parent
                     })
                     .inner
@@ -339,15 +322,7 @@ impl CodexAgentApp {
                             ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
                             for option in NOTIFICATION_OPTIONS.iter() {
                                 let active = option.enabled == self.notifications_enabled;
-                                if show_picker_row(
-                                    ui,
-                                    option.name,
-                                    SETTINGS_OPTION_MESSAGE,
-                                    false,
-                                    active,
-                                )
-                                .clicked()
-                                {
+                                if show_picker_row(ui, option.name, "", false, active).clicked() {
                                     if !active {
                                         self.select_notification(option.enabled);
                                     }
@@ -368,27 +343,11 @@ impl CodexAgentApp {
                         let mut close_parent = false;
                         show_picker(ui, |ui| {
                             ui.set_width(SETTINGS_SUBMENU_PICKER_WIDTH);
-                            if show_picker_row(
-                                ui,
-                                "Add",
-                                SETTINGS_OPTION_MESSAGE,
-                                false,
-                                false,
-                            )
-                            .clicked()
-                            {
+                            if show_picker_row(ui, "Add", "", false, false).clicked() {
                                 self.select_context_menu(true);
                                 close_parent = true;
                             }
-                            if show_picker_row(
-                                ui,
-                                "Remove",
-                                SETTINGS_OPTION_MESSAGE,
-                                false,
-                                false,
-                            )
-                            .clicked()
-                            {
+                            if show_picker_row(ui, "Remove", "", false, false).clicked() {
                                 self.select_context_menu(false);
                                 close_parent = true;
                             }
@@ -860,7 +819,8 @@ impl eframe::App for CodexAgentApp {
                                             Some(FontId::proportional(TEXT_FONT_SIZE));
                                         let mut layouter =
                                             |ui: &egui::Ui, text: &str, width: f32| {
-                                                let job = markdown_layout_job(text, width, &[], 0, &[]);
+                                                let job =
+                                                    markdown_layout_job(text, width, &[], 0, &[]);
                                                 ui.fonts(|fonts| fonts.layout_job(job))
                                             };
                                         TextEdit::multiline(&mut self.input)
@@ -952,7 +912,7 @@ impl eframe::App for CodexAgentApp {
                         }
                     });
                 let card_rect = card_response.response.rect;
-                let resize_rect = card_rect.translate(egui::vec2(0.0, -10.0));
+                let resize_rect = card_rect;
                 let drag_rect = card_rect.shrink2(egui::vec2(18.0, 8.0));
                 self.update_window_drag(resize_rect, drag_rect, self.output_rows_cache > 0);
             });

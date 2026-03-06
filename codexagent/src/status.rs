@@ -270,10 +270,13 @@ fn format_reset(limit: RateLimit, now: OffsetDateTime, local_offset: UtcOffset) 
         }
         let now_local = now.to_offset(local_offset).date();
         if resets_at.to_offset(local_offset).date() == now_local {
-            return format!("Resets Today at {}", format_local_time(resets_at, local_offset));
+            return format!(
+                "Resets Today at {}",
+                format_local_time(resets_at, local_offset)
+            );
         }
         return format!(
-            "Resets on {} at {}",
+            "Resets {} at {}",
             format_local_day(resets_at, local_offset),
             format_local_time(resets_at, local_offset)
         );
@@ -378,11 +381,7 @@ fn format_duration_seconds(seconds: u64) -> String {
 }
 
 fn pluralize(value: u64, singular: &'static str, plural: &'static str) -> &'static str {
-    if value == 1 {
-        singular
-    } else {
-        plural
-    }
+    if value == 1 { singular } else { plural }
 }
 
 fn format_percent(value: f64) -> String {

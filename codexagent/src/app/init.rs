@@ -10,7 +10,7 @@ use crate::config::{
 };
 use crate::logging;
 use crate::prompt::PromptStreamState;
-use crate::runtime::{current_cwd_text, current_model, set_window_app_id};
+use crate::runtime::{available_models, current_cwd_text, current_model, set_window_app_id};
 
 use super::{CodexAgentApp, ContextMenuState, SetupState};
 
@@ -37,6 +37,8 @@ impl CodexAgentApp {
                 DEFAULT_NOTIFICATIONS_ENABLED
             }
         };
+        let current_model = current_model();
+        let model_options = available_models(&current_model);
         Ok(Self {
             input: String::new(),
             prompt_history: history.prompts,
@@ -44,7 +46,8 @@ impl CodexAgentApp {
             prompt_history_draft: None,
             output_base: 0,
             output: String::new(),
-            current_model: current_model(),
+            current_model,
+            model_options,
             notifications_enabled,
             context_menu_state: ContextMenuState::Checking,
             context_menu_refresh_pending: false,
@@ -121,6 +124,10 @@ impl CodexAgentApp {
 
     pub(super) fn refresh_current_model(&mut self) {
         self.current_model = current_model();
+    }
+
+    pub(super) fn refresh_model_options(&mut self) {
+        self.model_options = available_models(&self.current_model);
     }
 
     pub(super) fn refresh_notifications_enabled(&mut self) {

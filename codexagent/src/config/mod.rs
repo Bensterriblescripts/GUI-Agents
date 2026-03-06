@@ -279,7 +279,6 @@ fn ensure_path(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-
 fn prompt_history_to_settings_slice(prompts: &[String]) -> HashMap<String, String> {
     let mut settings = HashMap::with_capacity((!prompts.is_empty()) as usize);
 
@@ -409,7 +408,6 @@ fn legacy_prompt_history_entries(settings: &HashMap<String, String>) -> io::Resu
 
     prompt_history_entries_from_output(&output, &prompt_ranges)
 }
-
 
 fn append_hex(out: &mut String, bytes: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";

@@ -136,10 +136,12 @@ impl CodexAgentApp {
         match set_notifications_enabled(enabled) {
             Ok(enabled) => {
                 self.notifications_enabled = enabled;
-                self.output.push_str("Notification set to ");
-                self.output.push_str(if enabled { "On" } else { "Off" });
-                self.input.clear();
-                self.reset_prompt_history_navigation();
+                self.push_settings_output(if enabled {
+                    "Notification set to On"
+                } else {
+                    "Notification set to Off"
+                });
+                self.finish_local_success();
             }
             Err(error) => {
                 logging::error(format!(
@@ -147,9 +149,7 @@ impl CodexAgentApp {
                     if enabled { "on" } else { "off" },
                     error
                 ));
-                self.output.push('\x1D');
-                self.output.push_str("Failed to set notification: ");
-                self.output.push_str(&error.to_string());
+                self.push_local_error(&format!("Failed to set notification: {}", error));
             }
         }
         self.finish_local_change();
@@ -171,12 +171,12 @@ impl CodexAgentApp {
                 };
                 self.context_menu_refresh_pending = false;
                 self.refresh_context_menu_state_async();
-                self.ensure_output_spacing();
-                self.output.push_str("Context menu ");
-                self.output
-                    .push_str(if enabled { "added" } else { "removed" });
-                self.input.clear();
-                self.reset_prompt_history_navigation();
+                self.push_settings_output(if enabled {
+                    "Context menu added"
+                } else {
+                    "Context menu removed"
+                });
+                self.finish_local_success();
             }
             Err(error) => {
                 logging::error(format!(
@@ -184,11 +184,11 @@ impl CodexAgentApp {
                     if enabled { "add" } else { "remove" },
                     error
                 ));
-                self.output.push('\x1D');
-                self.output.push_str("Failed to ");
-                self.output.push_str(if enabled { "add" } else { "remove" });
-                self.output.push_str(" context menu: ");
-                self.output.push_str(&error.to_string());
+                self.push_local_error(&format!(
+                    "Failed to {} context menu: {}",
+                    if enabled { "add" } else { "remove" },
+                    error
+                ));
             }
         }
         self.finish_local_change();
@@ -198,16 +198,13 @@ impl CodexAgentApp {
         match set_model(model) {
             Ok(model) => {
                 self.current_model = model.clone();
-                self.output.push_str("Model set to ");
-                self.output.push_str(&model);
-                self.input.clear();
-                self.reset_prompt_history_navigation();
+                let message = format!("Model set to {}", model);
+                self.push_settings_output(&message);
+                self.finish_local_success();
             }
             Err(error) => {
                 logging::error(format!("failed to set model {}: {}", model, error));
-                self.output.push('\x1D');
-                self.output.push_str("Failed to set model: ");
-                self.output.push_str(&error.to_string());
+                self.push_local_error(&format!("Failed to set model: {}", error));
             }
         }
         self.finish_local_change();
@@ -219,6 +216,23 @@ impl CodexAgentApp {
         self.refresh_after_text_change();
     }
 
+    fn finish_local_success(&mut self) {
+        self.input.clear();
+        self.reset_prompt_history_navigation();
+    }
+
+    fn push_local_error(&mut self, message: &str) {
+        self.output.push('\x1D');
+        self.output.push_str(message);
+    }
+
+    fn push_settings_output(&mut self, message: &str) {
+        self.ensure_output_spacing();
+        self.output.push('\x1C');
+        self.output.push_str(message);
+        self.output.push_str("\n\n");
+    }
+
     fn ensure_output_spacing(&mut self) {
         if self.output.is_empty() {
             return;
@@ -228,14 +242,6 @@ impl CodexAgentApp {
         } else if !self.output.ends_with("\n\n") {
             self.output.push('\n');
         }
-    }
-
-    fn clear_output_state(&mut self) {
-        self.output.clear();
-        self.output_base = 0;
-        self.prompt_ranges.clear();
-        self.output_display_can_append = false;
-        self.reset_stream_progress();
     }
 
     fn finish_prompt(&mut self, prompt_id: u64) {
@@ -251,7 +257,7 @@ impl CodexAgentApp {
 
     fn start_install_flow(&mut self, node_available: bool) {
         self.setup_state = SetupState::Installing;
-        self.clear_output_state();
+        self.clear_output_buffers();
         self.output.push_str("Installing Codex CLI...\n\n");
         self.refresh_after_text_change();
         self.spawn_install(node_available);
@@ -316,7 +322,7 @@ impl CodexAgentApp {
         self.ensure_output_spacing();
         self.output_base = self.output.len();
         self.output.push_str(&current_usage_text());
-        self.output_display_can_append = false;
+        self.mark_output_for_rebuild();
         self.input.clear();
         self.finish_local_change();
     }
@@ -329,7 +335,7 @@ impl CodexAgentApp {
         self.prompt_ranges.push((prompt_start, self.output.len()));
         self.output.push_str("\n\n");
         self.output_base = self.output.len();
-        self.output_display_can_append = false;
+        self.mark_output_for_rebuild();
     }
 
     pub(super) fn cancel_active_prompt(&mut self) {
@@ -431,7 +437,7 @@ impl CodexAgentApp {
                 self.locked = false;
                 self.pending_input_focus = true;
                 self.output.truncate(self.output_base);
-                self.output_display_can_append = false;
+                self.mark_output_for_rebuild();
                 match result {
                     PromptResult::Ok(text, sid) => {
                         self.output.reserve(text.len());
@@ -466,7 +472,7 @@ impl CodexAgentApp {
                 CodexCheckResult::Ready => {
                     self.setup_state = SetupState::Ready;
                     self.locked = false;
-                    self.clear_output_state();
+                    self.clear_output_buffers();
                     self.pending_input_focus = true;
                     self.refresh_after_text_change();
                 }
@@ -478,8 +484,7 @@ impl CodexAgentApp {
                 if matches!(self.setup_state, SetupState::Installing) {
                     self.output.push_str(&line);
                     self.output.push('\n');
-                    self.output_display_can_append = false;
-                    self.refresh_after_output_change();
+                    self.refresh_after_output_rewrite();
                 }
             }
             AppEvent::CodexInstallDone(result) => {
@@ -496,8 +501,7 @@ impl CodexAgentApp {
                         self.output.push_str(&msg);
                     }
                 }
-                self.output_display_can_append = false;
-                self.refresh_after_output_change();
+                self.refresh_after_output_rewrite();
             }
             AppEvent::ContextMenuSelection(result) => {
                 self.context_menu_refresh_pending = false;
@@ -546,7 +550,7 @@ impl CodexAgentApp {
         }
         self.output.push_str(&input);
         self.output.push('\n');
-        self.output_display_can_append = false;
+        self.mark_output_for_rebuild();
         self.pending_input_focus = true;
         self.refresh_after_text_change();
     }

@@ -15,6 +15,7 @@ use crate::config::{
 pub(super) enum OutputLineKind {
     #[default]
     Normal,
+    Action,
     Error,
     Reasoning,
     Agent,
@@ -32,6 +33,8 @@ struct MarkdownFormats {
     reasoning_code: TextFormat,
     agent: TextFormat,
     agent_code: TextFormat,
+    action: TextFormat,
+    action_code: TextFormat,
 }
 
 pub(super) fn pending_dots(step: u128) -> &'static str {
@@ -89,21 +92,25 @@ pub(super) fn markdown_layout_job(
             } else {
                 OutputLineKind::Normal
             };
-        let (rest, is_reasoning, is_agent, is_error) = if line.starts_with('\x1D') {
+        let (rest, is_reasoning, is_agent, is_error, is_action) = if line.starts_with('\x1C') {
+            job.append("\x1C", 0.0, formats.hidden.clone());
+            (&line[1..], false, false, false, true)
+        } else if line.starts_with('\x1D') {
             job.append("\x1D", 0.0, formats.hidden.clone());
-            (&line[1..], false, false, true)
+            (&line[1..], false, false, true, false)
         } else if line.starts_with('\x1E') {
             job.append("\x1E", 0.0, formats.hidden.clone());
-            (&line[1..], true, false, false)
+            (&line[1..], true, false, false, false)
         } else if line.starts_with('\x1F') {
             job.append("\x1F", 0.0, formats.hidden.clone());
-            (&line[1..], false, true, false)
+            (&line[1..], false, true, false, false)
         } else {
             (
                 line,
                 line_kind == OutputLineKind::Reasoning,
                 line_kind == OutputLineKind::Agent,
                 line_kind == OutputLineKind::Error,
+                line_kind == OutputLineKind::Action,
             )
         };
         let content = rest.strip_suffix('\n').unwrap_or(rest).trim_start();
@@ -127,6 +134,12 @@ pub(super) fn markdown_layout_job(
         }
         let format = if is_error {
             &formats.cancelled
+        } else if is_action {
+            if in_code {
+                &formats.action_code
+            } else {
+                &formats.action
+            }
         } else if is_reasoning {
             if in_code {
                 &formats.reasoning_code
@@ -152,7 +165,7 @@ pub(super) fn markdown_layout_job(
                 &formats.plain_new
             }
         };
-        if in_code || is_reasoning || is_error {
+        if in_code || is_reasoning || is_error || is_action {
             job.append(rest, 0.0, format.clone());
         } else if is_horizontal_rule(content) {
             job.append(rest, 0.0, formats.hidden.clone());
@@ -309,6 +322,7 @@ fn output_line_kind(line: &str, line_start: bool) -> (OutputLineKind, usize) {
         return (OutputLineKind::Normal, 0);
     }
     match line.as_bytes().first().copied() {
+        Some(0x1C) => (OutputLineKind::Action, 1),
         Some(0x1D) => (OutputLineKind::Error, 1),
         Some(0x1E) => (OutputLineKind::Reasoning, 1),
         Some(0x1F) => (OutputLineKind::Agent, 1),
@@ -356,6 +370,18 @@ fn markdown_formats() -> &'static MarkdownFormats {
                 font_id: FontId::monospace(HIDDEN_MARKDOWN_FONT_SIZE),
                 line_height: Some(CANCELLED_BOTTOM_PADDING),
                 color: Color32::TRANSPARENT,
+                ..Default::default()
+            },
+            action: TextFormat {
+                font_id: FontId::proportional(TEXT_FONT_SIZE),
+                color: Color32::from_rgb(148, 148, 148),
+                italics: true,
+                ..Default::default()
+            },
+            action_code: TextFormat {
+                font_id: FontId::monospace(TEXT_FONT_SIZE),
+                color: Color32::from_rgb(148, 148, 148),
+                italics: true,
                 ..Default::default()
             },
             reasoning: TextFormat {
