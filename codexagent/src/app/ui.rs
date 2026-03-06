@@ -13,8 +13,8 @@ use crate::notify;
 use super::position::startup_outer_position;
 use super::render::{OutputLineKind, markdown_layout_job};
 use super::{
-    CodexAgentApp, ContextMenuState, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS,
-    SetupState, WindowRestoreState,
+    CodexAgentApp, MODEL_OPTIONS, NOTIFICATION_OPTIONS, SLASH_COMMANDS, SetupState,
+    WindowRestoreState,
 };
 
 const TITLEBAR_BUTTON_SIZE: f32 = 24.0;
@@ -30,6 +30,7 @@ const SETTINGS_ROW_PADDING_X: f32 = 8.0;
 const SETTINGS_ROW_PADDING_Y: f32 = 5.0;
 const SETTINGS_ACTIVE_BADGE_WIDTH: f32 = 44.0;
 const SETTINGS_ACTIVE_BADGE_GAP: f32 = 10.0;
+const SETTINGS_OPTION_MESSAGE: &str = "\\n\\nThe Message\\n\\n";
 
 struct GlowPalette {
     stroke: Color32,
@@ -113,7 +114,15 @@ fn show_picker_row(
                 .sense(egui::Sense::empty()),
             );
             ui.add_space(10.0);
-            ui.add(
+            let description_label = if description == SETTINGS_OPTION_MESSAGE {
+                egui::Label::new(
+                    RichText::new(description)
+                        .italics()
+                        .color(Color32::from_rgba_unmultiplied(148, 148, 148, 210)),
+                )
+                .selectable(false)
+                .sense(egui::Sense::empty())
+            } else {
                 egui::Label::new(RichText::new(description).color(if active {
                     Color32::from_rgba_unmultiplied(214, 224, 238, 190)
                 } else {
@@ -121,7 +130,10 @@ fn show_picker_row(
                 }))
                 .truncate()
                 .selectable(false)
-                .sense(egui::Sense::empty()),
+                .sense(egui::Sense::empty())
+            };
+            ui.add(
+                description_label,
             );
         },
     );
@@ -299,7 +311,7 @@ impl CodexAgentApp {
                                 if show_picker_row(
                                     ui,
                                     option.name,
-                                    option.description,
+                                    SETTINGS_OPTION_MESSAGE,
                                     false,
                                     active,
                                 )
@@ -330,7 +342,7 @@ impl CodexAgentApp {
                                 if show_picker_row(
                                     ui,
                                     option.name,
-                                    option.description,
+                                    SETTINGS_OPTION_MESSAGE,
                                     false,
                                     active,
                                 )
@@ -352,34 +364,6 @@ impl CodexAgentApp {
                 }
                 let close_context_menu = ui
                     .menu_button(RichText::new("Right Click Option").monospace(), |ui| {
-                        let add_description = match self.context_menu_state {
-                            ContextMenuState::Checking => {
-                                "Add Explorer folder and background entries (checking registry...)"
-                            }
-                            ContextMenuState::Add => {
-                                "Add Explorer folder and background entries (currently installed)"
-                            }
-                            ContextMenuState::Remove => {
-                                "Add Explorer folder and background entries"
-                            }
-                            ContextMenuState::Error => {
-                                "Add Explorer folder and background entries (state unknown)"
-                            }
-                        };
-                        let remove_description = match self.context_menu_state {
-                            ContextMenuState::Checking => {
-                                "Remove Explorer folder and background entries (checking registry...)"
-                            }
-                            ContextMenuState::Add => {
-                                "Remove Explorer folder and background entries"
-                            }
-                            ContextMenuState::Remove => {
-                                "Remove Explorer folder and background entries (currently not installed)"
-                            }
-                            ContextMenuState::Error => {
-                                "Remove Explorer folder and background entries (state unknown)"
-                            }
-                        };
                         ui.set_width(SETTINGS_SUBMENU_WIDTH);
                         let mut close_parent = false;
                         show_picker(ui, |ui| {
@@ -387,7 +371,7 @@ impl CodexAgentApp {
                             if show_picker_row(
                                 ui,
                                 "Add",
-                                add_description,
+                                SETTINGS_OPTION_MESSAGE,
                                 false,
                                 false,
                             )
@@ -399,7 +383,7 @@ impl CodexAgentApp {
                             if show_picker_row(
                                 ui,
                                 "Remove",
-                                remove_description,
+                                SETTINGS_OPTION_MESSAGE,
                                 false,
                                 false,
                             )

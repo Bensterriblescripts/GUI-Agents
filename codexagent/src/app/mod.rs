@@ -51,44 +51,36 @@ pub(super) const SLASH_COMMANDS: [SlashCommand; 1] = [SlashCommand {
 
 pub(super) struct ModelOption {
     pub(super) name: &'static str,
-    pub(super) description: &'static str,
 }
 
 pub(super) const MODEL_OPTIONS: [ModelOption; 4] = [
     ModelOption {
         name: "gpt-5.3-codex",
-        description: "Default Codex model",
     },
     ModelOption {
         name: "gpt-5.2-codex",
-        description: "Latest Codex model",
     },
     ModelOption {
         name: "gpt-5-codex",
-        description: "Previous Codex model",
     },
     ModelOption {
         name: "gpt-5",
-        description: "General-purpose GPT-5",
     },
 ];
 
 pub(super) struct NotificationOption {
     pub(super) name: &'static str,
     pub(super) enabled: bool,
-    pub(super) description: &'static str,
 }
 
 pub(super) const NOTIFICATION_OPTIONS: [NotificationOption; 2] = [
     NotificationOption {
         name: "On",
         enabled: true,
-        description: "Show completion notifications (default)",
     },
     NotificationOption {
         name: "Off",
         enabled: false,
-        description: "Hide completion notifications",
     },
 ];
 
