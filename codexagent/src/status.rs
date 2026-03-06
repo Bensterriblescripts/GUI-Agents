@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset, Weekday};
+use time::{Duration, OffsetDateTime, UtcOffset, Weekday};
 
 use crate::logging;
 
@@ -260,23 +260,41 @@ fn format_limit(
 }
 
 fn format_reset(limit: RateLimit, now: OffsetDateTime, local_offset: UtcOffset) -> String {
-    if let Some(resets_at) = limit.resets_at {
-        let remaining_seconds = (resets_at - now).whole_seconds().max(0);
-        let resets_local = resets_at.to_offset(local_offset).date();
+    if let Some(resets_at) = normalize_reset(limit, now) {
+        let remaining_seconds = (resets_at - now).whole_seconds().max(1);
+        if remaining_seconds <= 10 * 60 {
+            return format!(
+                "Resets in {}",
+                format_duration_seconds(remaining_seconds as u64)
+            );
+        }
         let now_local = now.to_offset(local_offset).date();
-        return if remaining_seconds == 0 {
-            "Resets now".to_owned()
-        } else if resets_local == now_local {
-            "Resets Today".to_owned()
-        } else {
-            format!(
-                "Resets on {} at {}",
-                format_local_day(resets_at, local_offset),
-                format_local_time(resets_at, local_offset)
-            )
-        };
+        if resets_at.to_offset(local_offset).date() == now_local {
+            return format!("Resets Today at {}", format_local_time(resets_at, local_offset));
+        }
+        return format!(
+            "Resets on {} at {}",
+            format_local_day(resets_at, local_offset),
+            format_local_time(resets_at, local_offset)
+        );
     }
     format!("Window {}", format_duration_minutes(limit.window_minutes))
+}
+
+fn normalize_reset(limit: RateLimit, now: OffsetDateTime) -> Option<OffsetDateTime> {
+    let mut resets_at = limit.resets_at?;
+    if resets_at > now || limit.window_minutes == 0 {
+        return Some(resets_at);
+    }
+    let window_seconds = limit.window_minutes.saturating_mul(60);
+    if window_seconds == 0 {
+        return Some(resets_at);
+    }
+    let elapsed_seconds = (now - resets_at).whole_seconds().max(0) as u64;
+    let steps = elapsed_seconds / window_seconds + 1;
+    let shift_seconds = steps.saturating_mul(window_seconds).min(i64::MAX as u64) as i64;
+    resets_at += Duration::seconds(shift_seconds);
+    Some(resets_at)
 }
 
 fn format_local_day(datetime: OffsetDateTime, local_offset: UtcOffset) -> &'static str {
@@ -298,8 +316,11 @@ fn format_local_time(datetime: OffsetDateTime, local_offset: UtcOffset) -> Strin
         0 => 12,
         value => value,
     };
-    let suffix = if hour < 12 { "AM" } else { "PM" };
-    format!("{}:{:02} {}", display_hour, local.minute(), suffix)
+    let suffix = if hour < 12 { "am" } else { "pm" };
+    if local.minute() == 0 {
+        return format!("{}{}", display_hour, suffix);
+    }
+    format!("{}:{:02}{}", display_hour, local.minute(), suffix)
 }
 
 fn format_duration_minutes(minutes: u64) -> String {
@@ -322,6 +343,46 @@ fn format_duration_minutes(minutes: u64) -> String {
         return format!("{}d {}h", days, hours);
     }
     format!("{}d {}h {}m", days, hours, mins)
+}
+
+fn format_duration_seconds(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{} {}", seconds, pluralize(seconds, "second", "seconds"));
+    }
+    let minutes = seconds / 60;
+    let secs = seconds % 60;
+    if seconds < 60 * 60 {
+        if secs == 0 {
+            return format!("{} {}", minutes, pluralize(minutes, "minute", "minutes"));
+        }
+        return format!(
+            "{} {} {} {}",
+            minutes,
+            pluralize(minutes, "minute", "minutes"),
+            secs,
+            pluralize(secs, "second", "seconds")
+        );
+    }
+    let hours = minutes / 60;
+    let mins = minutes % 60;
+    if mins == 0 {
+        return format!("{} {}", hours, pluralize(hours, "hour", "hours"));
+    }
+    format!(
+        "{} {} {} {}",
+        hours,
+        pluralize(hours, "hour", "hours"),
+        mins,
+        pluralize(mins, "minute", "minutes")
+    )
+}
+
+fn pluralize(value: u64, singular: &'static str, plural: &'static str) -> &'static str {
+    if value == 1 {
+        singular
+    } else {
+        plural
+    }
 }
 
 fn format_percent(value: f64) -> String {
