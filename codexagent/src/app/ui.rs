@@ -419,8 +419,18 @@ impl eframe::App for CodexAgentApp {
         self.was_focused = focused;
 
         if self.resizing && ctx.input(|input| !input.pointer.primary_down()) {
+            let size = ctx.screen_rect().size();
+            let resized = self
+                .resize_start_inner_size
+                .take()
+                .is_some_and(|start| !Self::same_size(Some(start), size));
             self.resizing = false;
-            self.user_height_override = Some(ctx.screen_rect().height());
+            self.last_inner_size = Some(size);
+            self.user_height_override = if resized || self.user_height_override.is_some() {
+                Some(size.y)
+            } else {
+                None
+            };
             self.invalidate_text_layout();
         }
 
@@ -449,6 +459,7 @@ impl eframe::App for CodexAgentApp {
             .show(ctx, |ui| {
                 let glow = self.glow_palette();
                 ui.set_min_size(ui.available_size());
+                let resize_rect = ui.max_rect();
                 let card_response = egui::Frame::new()
                     .fill(Color32::from_rgba_unmultiplied(14, 18, 24, 204))
                     .stroke(egui::Stroke::new(1.0, glow.stroke))
@@ -912,7 +923,6 @@ impl eframe::App for CodexAgentApp {
                         }
                     });
                 let card_rect = card_response.response.rect;
-                let resize_rect = card_rect;
                 let drag_rect = card_rect.shrink2(egui::vec2(18.0, 8.0));
                 self.update_window_drag(resize_rect, drag_rect, self.output_rows_cache > 0);
             });

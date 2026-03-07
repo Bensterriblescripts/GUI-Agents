@@ -89,6 +89,7 @@ impl CodexAgentApp {
             was_minimized: false,
             maximized: false,
             resizing: false,
+            resize_start_inner_size: None,
             user_height_override: None,
             min_inner_size: None,
             last_inner_size: None,

@@ -142,6 +142,7 @@ pub(crate) struct CodexAgentApp {
     was_minimized: bool,
     maximized: bool,
     resizing: bool,
+    resize_start_inner_size: Option<Vec2>,
     user_height_override: Option<f32>,
     min_inner_size: Option<Vec2>,
     last_inner_size: Option<Vec2>,

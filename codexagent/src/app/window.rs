@@ -358,8 +358,7 @@ impl CodexAgentApp {
             self.drag_armed = false;
             self.window_dragging = false;
             self.resizing = true;
-            self.user_height_override = Some(self.ctx.screen_rect().height());
-            self.last_inner_size = Some(self.ctx.screen_rect().size());
+            self.resize_start_inner_size = Some(self.ctx.screen_rect().size());
             self.ctx
                 .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
             return;
