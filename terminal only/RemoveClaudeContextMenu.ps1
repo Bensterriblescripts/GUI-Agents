@@ -2,7 +2,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
   Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"'-f$PSCommandPath); exit
 }
 
-$MenuName = 'Launch Codex'
+$MenuName = 'Launch Claude'
 @(
   "HKLM:\Software\Classes\Directory\shell\$MenuName",
   "HKLM:\Software\Classes\Directory\Background\shell\$MenuName"
