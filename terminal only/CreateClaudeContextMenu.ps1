@@ -33,7 +33,7 @@ function ConvertTo-SingleQuotedPowerShellString([string]$Value) {
 }
 
 function New-ClaudeCommand([string]$WindowsPathToken) {
-  $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Invoke-Expression $(ConvertTo-SingleQuotedPowerShellString $PreLaunchCommand); & $(ConvertTo-SingleQuotedPowerShellString $ClaudeExe)"))
+  $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Invoke-Expression $(ConvertTo-SingleQuotedPowerShellString $PreLaunchCommand); & $(ConvertTo-SingleQuotedPowerShellString $ClaudeExe) --dangerously-skip-permissions"))
   return "`"$WtExe`" -d `"$WindowsPathToken`" `"$PowerShellExe`" -NoExit -ExecutionPolicy Bypass -EncodedCommand $EncodedCommand"
 }
 
