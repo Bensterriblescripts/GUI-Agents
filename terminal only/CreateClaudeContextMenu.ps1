@@ -24,16 +24,43 @@ $ClaudeHome = Join-Path $env:USERPROFILE '.claude'
 }
 '@
 $WtExe = (Get-Command wt.exe -ErrorAction Stop).Source
-$ClaudeExe = (Get-Command claude.exe, claude -ErrorAction Stop | Select-Object -First 1).Source
+$ClaudeCommand = Get-Command claude -ErrorAction Stop | Select-Object -First 1
+$ClaudeExeCommand = Get-Command claude.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
-$IconPath = $ClaudeExe
+$ClaudeLaunchTarget = $null
+$ClaudeIcon = $null
+$DefaultIcon = (Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\DefaultIcon' -Name '(default)' -ErrorAction SilentlyContinue).'(default)'
+
+if ($ClaudeExeCommand -and $ClaudeExeCommand.Source) {
+  $ClaudeIcon = $ClaudeExeCommand.Source
+}
+
+if ($ClaudeCommand.CommandType -eq 'Application' -and [IO.Path]::GetExtension($ClaudeCommand.Source) -ieq '.exe') {
+  $ClaudeLaunchTarget = $ClaudeCommand.Source
+  if (-not $ClaudeIcon) {
+    $ClaudeIcon = $ClaudeCommand.Source
+  }
+} elseif ($ClaudeCommand.Source -and (Test-Path $ClaudeCommand.Source) -and [IO.Path]::GetExtension($ClaudeCommand.Source) -ieq '.exe') {
+  $ClaudeLaunchTarget = $ClaudeCommand.Source
+}
+
+if (-not $ClaudeLaunchTarget -and $ClaudeExeCommand -and $ClaudeExeCommand.Source) {
+  $ClaudeLaunchTarget = $ClaudeExeCommand.Source
+}
+
+$IconPath = if ($ClaudeIcon) { $ClaudeIcon } elseif ($DefaultIcon) { $DefaultIcon } else { "$env:SystemRoot\System32\imageres.dll,-109" }
 
 function ConvertTo-SingleQuotedPowerShellString([string]$Value) {
   return "'" + ($Value -replace "'", "''") + "'"
 }
 
 function New-ClaudeCommand([string]$WindowsPathToken) {
-  $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Invoke-Expression $(ConvertTo-SingleQuotedPowerShellString $PreLaunchCommand); & $(ConvertTo-SingleQuotedPowerShellString $ClaudeExe) --dangerously-skip-permissions"))
+  $ClaudeInvocation = if ($ClaudeLaunchTarget) {
+    "& $(ConvertTo-SingleQuotedPowerShellString $ClaudeLaunchTarget) --dangerously-skip-permissions"
+  } else {
+    'claude --dangerously-skip-permissions'
+  }
+  $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("Invoke-Expression $(ConvertTo-SingleQuotedPowerShellString $PreLaunchCommand); $ClaudeInvocation"))
   return "`"$WtExe`" -d `"$WindowsPathToken`" `"$PowerShellExe`" -NoExit -ExecutionPolicy Bypass -EncodedCommand $EncodedCommand"
 }
 
